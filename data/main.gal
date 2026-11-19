@@ -1,0 +1,769 @@
+# ============================================================
+# 主线剧本 · 第一章「靠窗的位置」
+# 地点：成都 · 四川省图书馆三楼社科区
+# 女主：沈知霁（人设见 data/characters.gal）
+#
+# 格式：
+#   :: 节点id                          开一个新节点
+#   说话人|台词                        一行台词
+#   |台词                             旁白
+#   -> 选项文字|目标节点              普通分支
+#   -> 选项文字|@角色id:返回节点        AI 支线分支
+#   -> 选项文字|@角色id:返回节点|玩家这句话|本分支场景|好感度增减
+#                                     后三列可省略，省略时用角色卡默认值
+# 台词里不能出现半角竖线，需要时用全角｜
+# ============================================================
+
+:: start
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+|成都的秋雨下了三天。四川省图书馆三楼，社科区几乎满座。
+|靠窗那张长桌只剩一个人对面的空位。
+|桌上摊着一摞贴满索引贴的地方志，旁边是深色帆布包，保温杯压着笔记本。
+|黑发，低马尾，深灰卫衣。她没抬头，笔尖停在书页边。
+-> 同学，这里可以坐吗|meet|同学，这里可以坐吗？|+1
+-> 先绕一圈找找别的位置|wander|我先去找找别的位置。|0
+
+:: wander
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+|一圈下来，空位比资料还稀缺。你又回到那张桌子前。
+|她仍然没抬头，只把椅子往里挪了两指。
+-> 同学，这里可以坐吗|meet|同学，这里可以坐吗？|-1
+
+:: meet
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@offline 沈知霁：……嗯。
+@offline 旁白：她把书往自己那边收了收，才抬眼看你一下。
+@offline 沈知霁：坐吧。四点我去还书。
+沈知霁|椅子没人。
+|她把书往自己那边收了收。
+沈知霁|别碰桌上那摞书，也别把奶茶放这边。
+-> 好，我注意|@shenzhiji:after_meet|好，我注意。书我不碰。|成都秋雨天，省图三楼满座，她对面刚空出一个位置。|6
+-> 我就一杯白开水，放我这边|@shenzhiji:after_meet|我就带了杯白开水，放我自己这边。|成都秋雨天，省图三楼满座，她对面刚空出一个位置。|9
+-> 这么厚的书，能看完吗|after_meet_cold|这么多书，你看得完吗？|-2
+
+:: after_meet_cold
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+|她抬眼看你一下，又落回书页。
+沈知霁|看书的时候，不聊天。
+-> 抱歉，我安静点|after_meet|抱歉，我不说话了。|0
+-> 随便问问而已|after_meet|随便问问。|-1
+
+:: after_meet
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+|你坐下，把伞收在脚边。她继续做笔记，笔尖沙沙地走。
+|四点她去还书，回来时把椅子推得比刚才轻。
+|临走前，她看了一眼你留在桌上的借阅单。
+-> 明天这个点，我还来|day2|明天这个点，我还来。|+3
+-> 我也该走了|day2|我也该走了。|0
+
+:: day2
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+|第二天下午，还是那张桌子。她已经在了，杯里的水是新换的。
+沈知霁|嗯，你又来了。
+-> 今天提前十分钟到，怕你没位置|@shenzhiji:after_day2|今天提前十分钟到，怕你这边没位置。|第二天下午，省图三楼同一张靠窗长桌。|12
+-> 上次那本《成都通史》我还了|after_day2|上次那本《成都通史》我还了。|+2
+-> 你每天都坐这个位置？|day2_cold|你每天都坐这个位置？|-1
+
+:: day2_cold
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+|她翻过一页，没有接话。过了两秒才开口。
+沈知霁|坐习惯了。
+|之后一下午，你们之间只有翻页声。
+-> 我不打扰你了|after_day2|我不打扰你了。|-1
+
+:: after_day2
+@bg bg_lib_shelf
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@offline 沈知霁：……知道了。
+@offline 旁白：她把椅子往里挪了挪，给你让出位置。
+@offline 沈知霁：要查什么，先想清楚再问我。
+|五点半，她把书签夹进去，合上其中一本。
+沈知霁|《成都通史》在三楼，别问前台，他们只会让你查系统。
+|她的指尖在书脊上敲了一下。
+-> 我这部分地方志找不到索引，能帮我看下吗|@shenzhiji:after_index|这部分地方志我找不到索引，你能帮我看一下吗？|省图三楼，她桌上摊着几本巴蜀地方志。|12
+-> 谢谢，我自己找找|after_index|谢谢，我自己找找。|+1
+
+:: after_index
+@bg bg_lib_shelf
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@offline 沈知霁：嗯。
+@offline 旁白：她把索引贴收回本子，拉上拉链。
+@offline 沈知霁：雨大了。……伞带了没。
+|她从帆布包里抽出一叠蓝色索引贴，撕下一张递过来。
+沈知霁|按朝代排的，别混。
+|你照她的标记翻，确实快了很多。半小时后她收笔。
+|窗外雨大了。她看了眼门口，又看了眼你脚边的伞。
+-> 伞放前台了，我先走|@shenzhiji:after_rain|你的伞我放前台了，我先走。|闭馆前十分钟，雨还在下，馆门口有人在等伞。|15
+-> 一起走到地铁口？|rain_cold|一起走到地铁口？|-3
+
+:: rain_cold
+@bg bg_rain_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+|她把包背好，往侧门走。
+沈知霁|不用，我走侧门。
+|玻璃门合上的时候，她没有回头。
+-> 明天见|after_rain|明天见。|-1
+
+:: after_rain
+@bg bg_rain_window
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@offline 沈知霁：嗯。
+@offline 旁白：她把保温杯拧开，又拧上。
+@offline 沈知霁：伞拿好。
+|第二天，前台的工作人员把一个纸袋递给你。
+|里面是你的伞，收得整整齐齐，袋口别着一张便签：下次记得带。
+|她已经坐在老位置，桌上多了一个保温杯。
+-> 伞我拿回来了，谢谢|@shenzhiji:exam_week|伞我拿回来了，谢谢。|两天后，省图三楼靠窗，桌上摆着两只保温杯。|12
+-> 便签是你写的？|exam_week|便签是你写的？|+2
+
+:: exam_week
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@offline 沈知霁：……嗯。
+@offline 旁白：她把保温杯往桌子中间挪了挪。
+@offline 沈知霁：考完再说。
+|十一月，考试周。三楼的位置一位难求。
+|你连着三天没来。第四天进门时，她先看见你。
+沈知霁|位置给你留着。
+|她把占座的书往上摞了一本，空出对面。
+-> 我以为你早走了|@shenzhiji:after_exam|我以为你早走了。|考试周的省图三楼，她把座位留到了闭馆前。|15
+-> 谢谢，这几天在考试|after_exam|谢谢，这几天在考试。|+3
+
+:: after_exam
+@bg bg_lib_night
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+|闭馆前十分钟，广播响了。她合上书，慢慢收东西。
+|灯一排一排地灭。她站在门口，没有催你。
+沈知霁|明天……还来吗。
+-> 来|ending|来。|+5
+-> 看情况|ending|看情况。|0
+
+:: ending
+@bg bg_street_night
+@char shenzhiji:normal
+@loc 省图门口台阶
+|雨停了。成都的夜风带着潮气，从图书馆的台阶上吹下来。
+|她走在前面半步，脚步比平时慢。
+沈知霁|路上小心。
+|（第一章 完）
+-> 第二天，还是那张桌子|ch2_open|||0
+
+
+# ============================================================
+# 第二章 · 事件章
+# 入口 ch2_open -> hub；hub 按好感度自动路由，每个事件只演一次（@once）
+# 好感 -> 分支：5-9 A1 / 10-20 A2 / 21-24 B1 / 25-29 B2 / 30-45 B3
+#               46-49 C1 / 50-59 C2 / 60-70 C3 / 71-74 D1 / 75-77 D2
+#               78-85 D3 / 86+ D4；天府馆 E1>=46 / E2>=71
+# 详细表见 docs/好感分支表.md
+# ============================================================
+
+:: ch2_open
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+|第二天，雨停了。省图三楼靠窗那张桌子，她又在了。
+|桌上还是保温杯、贴满索引贴的笔记本，和一摞地方志。
+|她抬眼看你一下，把对面的椅子往外推了半寸。
+沈知霁|坐。
+-> 坐下|hub|||3
+-> 这周末去天府馆|hub_tiandu|||0
+
+:: hub
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@toast （图书馆的钟走过一格。）
+=> aff>=86 d4_confession
+=> aff>=82 g6_meal
+=> aff>=78 d3_cat
+=> aff>=75 d2_exam
+=> aff>=71 d1_tissue
+=> aff>=64 g5_rain
+=> aff>=60 c3_closing
+=> aff>=54 g4_pencil
+=> aff>=50 c2_powerbank
+=> aff>=46 c1_index
+=> aff>=40 g3_mask
+=> aff>=36 g2_cup
+=> aff>=32 g1_machine
+=> aff>=30 b3_topic
+=> aff>=25 b2_tiandu
+=> aff>=21 b1_return
+=> aff>=18 f15_elevator
+=> aff>=17 f14_seat
+=> aff>=16 f13_door
+=> aff>=15 f12_carry
+=> aff>=14 f11_lamp
+=> aff>=13 f10_yield
+=> aff>=12 f9_cup
+=> aff>=10 a2_umbrella
+=> aff>=9  f8_bump
+=> aff>=8  f7_blackout
+=> aff>=7  f6_callno
+=> aff>=5  a1_third_day
+=> aff>=4  f5_paper
+=> aff>=3  f4_chair
+=> aff>=2  f3_books
+=> aff>=1  f2_pen
+=> aff>=0  f1_seat
+|图书馆的钟走到四点。她翻过一页，把保温杯挪回自己手边。
+|（今天没什么特别的事。安静坐着，也算数——总会有下一次。）
+-> 安静坐下，看自己的书|hub|||9
+
+# ---------------- 阶段 0：A 类 ----------------
+
+:: a1_third_day
+@once A1
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@event A1 连续同坐第三天
+|成都的雨连着下了三天，靠窗这张桌子像被默认分了座位。
+|你今天早到十分钟，她还没来，桌上已经放着那只深色帆布包。
+|十分钟后她撑伞进来，看见你，脚步顿了一下。
+|收伞，装进自带的塑料袋，不滴水；把包从对面椅子上拿开，坐下。
+|三分钟过去，她翻过一页，笔尖没停。
+沈知霁|今天来得早。
+-> 嗯，怕没位置|hub|||6
+-> （点头，继续看书）|a3_tab|||3
+-> 你每天都这么早？|a1_cold|||-4
+
+:: a1_cold
+@char shenzhiji:down
+|她翻过一页，没有回答。
+沈知霁|看书吧。
+|之后的一下午，她没有再开口。
+-> 安静坐下|hub|||0
+
+:: a2_umbrella
+@once A2
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@event A2 雨伞忘在前台
+|第二天你回来找伞。她已经坐在老位置，头也没抬。
+沈知霁|前台。昨天放过去的。
+-> 谢谢|hub|||6
+-> 你是不是特意帮我收的？|a2_cold|||-3
+
+:: a2_cold
+@char shenzhiji:down
+|她翻页的手停了半秒。
+沈知霁|顺手。
+|然后继续看书，没有再看你。
+-> 坐下|hub|||0
+
+:: a3_tab
+@once A3
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+@event A3 索引贴滑落
+|她翻页的时候，一张黄色索引贴从笔记本边滑到桌沿，她没注意。
+-> 你的贴掉了（不动手）|a3_ok|||6
+-> （伸手去碰她的笔记本）|a3_bad|||-5
+
+:: a3_ok
+@char shenzhiji:normal
+|她低头看了眼桌沿，把贴收回，贴回页边。
+沈知霁|嗯。
+|过了半分钟，笔尖没停，声音很轻。
+沈知霁|谢谢。
+-> 继续看书|hub|||0
+
+:: a3_bad
+@char shenzhiji:look
+|她的手先按在笔记本上。
+沈知霁|我自己来。
+|语气客气，但椅子往回收了一点。
+-> 抱歉|hub|||0
+
+# ---------------- 阶段 1：B 类 ----------------
+
+:: b1_return
+@once B1
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event B1 还书提醒
+|你坐下，她看了一眼你手里的书。
+沈知霁|《成都通史》还了没？下周到期。
+-> 还没，明天去还|hub|||6
+-> 你帮我记着？|b1_cold|||0
+
+:: b1_cold
+|她低头翻页。
+沈知霁|随口。
+-> 坐下|hub|||0
+
+:: b2_tiandu
+@once B2
+@bg bg_lib_shelf
+@char shenzhiji:normal
+@loc 天府人文艺术图书馆·中庭
+@event B2 天府人文艺术图书馆偶遇
+|周末的天府馆中庭很亮，她坐在艺术类书架那侧。
+|面前摊着《蜀中广记》影印本，还有一台旧笔记本。
+|她看见你，明显愣了一下。
+沈知霁|……你也来这边。
+-> 嗯，换个地方看书|hub|||6
+-> 周末也来？|b2_q|||3
+
+:: b2_q
+|她把书往自己那边挪了挪。
+沈知霁|省图人多。今天换了个地方。
+-> 那我在旁边坐|hub|||3
+
+:: b3_topic
+@once B3
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event B3 巴蜀地方史话题
+|她正在比对两版《成都县志》，眉头微微皱着。
+-> 你在查什么？|b3_ask|||3
+-> （不打扰，看自己的书）|hub|||3
+
+:: b3_ask
+|她抬眼看了你一下，比平时多停了半秒。
+沈知霁|两个版本的坊巷记载对不上。想找清代那版核对。
+-> 《华阳国志》里有坊巷条，省志的舆图也能对|hub|||6
+-> 哦，那挺麻烦的|hub|||0
+
+# ---------------- 阶段 2：C 类 ----------------
+
+:: c1_index
+@once C1
+@bg bg_lib_shelf
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event C1 索引求助
+|你拿着一本翻乱的索引册过来，她放下笔。
+沈知霁|哪一部分？
+-> 清代成都县的坊巷部分|c1_ok|||6
+-> （掏出手机直接拍她的笔记）|c1_bad|||-3
+
+:: c1_ok
+|她从笔记本里抽出一叠蓝色索引贴。
+沈知霁|我做过一点。可以给你看，别外传。
+|她指了三处，说完就把本子收回去了。
+-> 记下来，谢谢|hub|||9
+
+:: c1_bad
+|她的手按在本子上，抬头看你。
+沈知霁|别拍。
+|声音不大，但没有商量的余地。
+-> 收起来|hub|||0
+
+:: c2_powerbank
+@once C2
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event C2 充电宝与回礼
+|你手机没电，翻了翻包。
+|她从帆布包侧袋里拿出充电宝，推过来。
+沈知霁|安卓还是苹果。
+-> 安卓，谢谢|hub|||6
+-> （用完直接放自己包里）|c2_bad|||-2
+
+:: c2_bad
+|她看了一眼你的包，什么也没说。
+沈知霁|……放桌上就行。
+-> 放回去|hub|||0
+
+:: c3_closing
+@once C3
+@bg bg_lib_night
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event C3 闭馆前十分钟
+|闭馆音乐响了。她开始收书，动作不快。
+|收完站着没走，看了一眼你还在写的笔记。
+沈知霁|……走的时候叫我。
+-> 马上，收一下|hub|||6
+-> 你先走，我再待会儿|hub|||-2
+
+# ---------------- 阶段 3：D 类 ----------------
+
+:: d1_tissue
+@once D1
+@bg bg_rain_window
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event D1 雨夜多带的一包纸巾
+|你头发滴着水坐下。她从包里摸出一包纸巾，放在桌角，没推过来。
+沈知霁|桌角。
+-> 谢谢|hub|||9
+-> 你是不是专门带的？|d1_cold|||0
+
+:: d1_cold
+|她翻过一页，眼睛没离开书。
+沈知霁|想多了。
+-> 拿纸巾擦头发|hub|||0
+
+:: d2_exam
+@once D2
+@bg bg_lib_window
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event D2 考试周的记忆
+|你趴桌补觉，她看了两眼，没叫。
+|你醒来的时候，她头也没抬。
+沈知霁|考试周？
+-> 嗯，还有两门|d2_ok|||9
+-> 你关心我？|d2_cold|||0
+
+:: d2_ok
+|她把保温杯往你这边挪了半寸。
+沈知霁|热水。杯子没碰过。
+|说完立刻补了一句。
+沈知霁|别多想，我喝不完。
+-> 接过杯子|hub|||0
+
+:: d2_cold
+|她收回手，继续写字。
+沈知霁|……热水。杯子没碰过。
+-> 谢谢|hub|||0
+
+:: d3_cat
+@once D3
+@bg bg_street_night
+@char shenzhiji:soft
+@loc 省图门口台阶
+@event D3 图书馆外的流浪猫
+|傍晚出馆，台阶下有只三花猫。她蹲下，把水倒进纸盒。
+沈知霁|别摸，它怕人。
+-> （在旁边安静站着）|hub|||9
+-> 你人真好|d3_cold|||0
+
+:: d3_cold
+|她起身拍了拍手。
+沈知霁|别。
+|然后先往前走了两步。
+-> 跟上|hub|||0
+
+:: d4_confession
+@once D4
+@bg bg_street_night
+@char shenzhiji:soft
+@loc 省图门口台阶
+@event D4 阶段4破例与表白窗口
+|闭馆后的台阶，雨刚停。
+|她说“我想一下”，低头看着鞋尖，耳尖有点红。
+-> （不追问，等她）|d4_yes|||15
+-> 那到底行不行|d4_no|||-5
+
+:: d4_yes
+|她沉默了几秒，把帆布包换到另一只手。
+沈知霁|明天……你还来吗。
+-> （点头）|route_end|||6
+
+:: d4_no
+|她后退了半步。
+沈知霁|说了想一下。
+|然后转身往台阶下走。
+-> （站在原地）|route_end|||0
+
+# ---------------- 天府馆支线：E 类 ----------------
+
+:: hub_tiandu
+@bg bg_lib_shelf
+@char shenzhiji:normal
+@loc 天府人文艺术图书馆
+=> aff>=71 e2_bench
+=> aff>=46 e1_afternoon
+|（这个地点还没有能触发的事件。省图人少的时候再来吧。）
+-> 回省图|hub|||0
+
+:: e1_afternoon
+@once E1
+@bg bg_lib_shelf
+@char shenzhiji:normal
+@loc 天府人文艺术图书馆
+@event E1 艺术馆的午后
+|落地窗外是天府艺术公园。她坐在艺术类书架旁，桌上多了一本画册。
+|你把包放下，她把画册往自己那边挪了挪。
+沈知霁|这边比省图亮。
+-> 嗯，人也少|hub_tiandu|||6
+-> （安静坐下，不接话）|hub_tiandu|||3
+
+:: e2_bench
+@once E2
+@bg bg_street_night
+@char shenzhiji:soft
+@loc 天府艺术公园·湖边
+@event E2 公园长椅的十分钟
+|天府馆闭馆早。你们一起走出来，她经过长椅时停了半拍，没坐。
+-> 坐一会儿？|e2_ok|||9
+-> （继续走）|route_end|||0
+
+:: e2_ok
+|她看了你一眼，又看了看湖面。
+沈知霁|……十分钟。
+|坐下之后她没说话，只看湖。到点就起身。
+沈知霁|走了。
+-> 跟上|route_end|||3
+
+:: route_end
+|（本次事件结束。回到省图，下一次好感度会把你带向别的分支。）
+-> 回到省图|hub|||0
+
+# ---------------- 低好感填充：F 类（0-4 也有事做） ----------------
+
+:: f1_seat
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+@event F1 空位
+@once F1
+|三楼靠窗那排只剩她对面的位置。你把包放下，她没抬头。
+|半小时里你们谁也没说话。她翻页很轻，杯子放在自己那一侧。
+-> 安静坐着，看自己的书|hub|||3
+-> 找句话说：今天人挺多|f1_cold|||3
+
+:: f1_cold
+|她抬眼看了一下，又低下去。
+沈知霁|嗯。
+|之后没有再开口。
+-> 安静坐着|hub|||0
+
+:: f2_pen
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event F2 借笔
+@once F2
+|她的笔在纸上划了两下，没水了。翻包，没找到第二支。
+|你把手里那支递过去。她看了你一眼，接过。
+沈知霁|……谢谢。
+-> 继续看书|hub|||3
+
+:: f3_books
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event F3 扶住书堆
+@once F3
+|她起身去还书，桌边那摞地方志晃了一下。
+|你伸手扶住。她回头看了你一眼。
+沈知霁|……放着就行。
+-> 放回去|hub|||3
+
+:: f4_chair
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@event F4 推回的椅子
+@once F4
+|闭馆前她先走，把自己的椅子推回桌下，顺手把你那把也推了。
+|你抬头的时候，她已经走到门口，回过头。
+沈知霁|明天这个位置，有人。
+-> 那我换个位置|hub|||3
+-> 我早点来|hub|||6
+
+# ---------------- 低好感填充：F5–F15 ----------------
+
+:: f5_paper
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event F5 桌上那滩水
+@once F5
+|你的伞在滴水，桌脚积了一小滩。她看了一眼，把自己的纸巾盒推过来一半。
+沈知霁|擦一下。
+-> 抽一张，把水擦干|hub|||6
+-> 不用，我一会儿拖|hub|||3
+
+:: f6_callno
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+@event F6 乱掉的索书号
+@once F6
+|她对着电脑屏幕皱眉，手里的纸条抄着一串索书号。
+沈知霁|三楼这排……编号是乱的。
+-> 我熟这排，帮你找|hub|||6
+-> 那去问前台吧|hub|||3
+
+:: f7_blackout
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event F7 三楼停电两分钟
+@once F7
+|灯闪了两下，整层暗下来。有人小声抱怨。她合上书，没动。
+沈知霁|……两分钟就好。
+-> 开手机手电，照着她的桌面|hub|||6
+-> 一起等|hub|||3
+
+:: f8_bump
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@event F8 碰歪的书
+@once F8
+|你起身的时候撞到桌角，她那摞地方志歪了一半，最上面一本滑到桌沿。
+-> 立刻扶正，说对不起|hub|||6
+-> 看一眼，先走|hub|||-2
+
+:: f9_cup
+@bg bg_lib_window
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event F9 咳嗽与空杯子
+@once F9
+|她压低声音咳了两下，端起杯子才发现是空的，又放下。
+-> 把没喝过的水推过去|hub|||6
+-> 起身去接一杯，放她桌角|hub|||9
+-> 装作没听见|hub|||0
+
+:: f10_yield
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event F10 让座
+@once F10
+|今天人多，你到的时候旁边已经坐满。她站在书架边，抱着包。
+-> 起身把位置让给她|hub|||6
+-> 装作没看见|hub|||-1
+
+:: f11_lamp
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event F11 关掉的台灯
+@once F11
+|她起身去还书，路过时顺手把你这侧的台灯关了。
+|你抬头，她已经走开两步。
+-> 说声谢谢|hub|||3
+-> 自己重新打开，没说话|hub|||0
+
+:: f12_carry
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event F12 帮拿一半
+@once F12
+|她抱着一摞书排在还书机前，队伍一动不动。
+-> 帮她拿一半|hub|||6
+-> 在旁边等|hub|||3
+
+:: f13_door
+@bg bg_rain_window
+@char shenzhiji:soft
+@loc 省图一楼门口
+@event F13 雨停后的门口
+@once F13
+|雨停了。两人同时走到门口，玻璃门只开了一半。
+|她往旁边让了半步，等你先过。
+-> 你先过|hub|||6
+-> 一起出去|hub|||3
+
+:: f14_seat
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@event F14 她记得你的位置
+@once F14
+|你进门的时候，她抬了一下头。
+沈知霁|你今天没坐那边。
+-> 那边没位置了|hub|||6
+-> （笑一下，坐下）|hub|||3
+
+:: f15_elevator
+@bg bg_lib_night
+@char shenzhiji:normal
+@loc 省图三楼电梯口
+@event F15 闭馆前的电梯
+@once F15
+|闭馆，电梯口排着队。她站在你前面两步，没说话。
+|电梯到了，她没动，等后面的人先上。
+-> 安静站着，等她先上|hub|||6
+-> 找话说：今天雨停了|hub|||3
+
+# ---------------- 中段补充：G 类（B3/C2/C3/D3 宽区间） ----------------
+
+:: g1_machine
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event G1 自助借阅机
+@once G1
+|自助借阅机前排着队。她站在机器前，屏幕停在借书证扫码那页，没动。
+-> 帮她点一下「借书」|hub|||6
+-> 在旁边等|hub|||3
+
+:: g2_cup
+@bg bg_lib_window
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event G2 多带的杯子
+@once G2
+|她把保温杯放在桌上，又从包里拿出第二个，拧开，往你那边推了半寸。
+沈知霁|……多带了一个。
+-> 接过来，说谢谢|hub|||9
+-> 不用，我自己带了|hub|||3
+
+:: g3_mask
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event G3 桌角的口罩
+@once G3
+|你咳了两声。她翻包，摸出一只没拆封的口罩，放在桌角。
+沈知霁|戴着。
+-> 拆开戴上|hub|||6
+-> 不用，我没事|hub|||3
+
+:: g4_pencil
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event G4 敞着的笔袋
+@once G4
+|她起身去接水，笔袋落在桌上，拉链开着，笔尖朝外。
+-> 帮她拉上，推到她那侧|hub|||6
+-> 不动|hub|||0
+
+:: g5_rain
+@bg bg_rain_window
+@char shenzhiji:soft
+@loc 省图一楼门口
+@event G5 门口等雨
+@once G5
+|闭馆时雨下得正大。她站在门口看了一会儿，没撑伞。
+-> 把伞递过去|hub|||9
+-> 一起等|hub|||6
+
+:: g6_meal
+@bg bg_lib_night
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event G6 你吃了吗
+@once G6
+|她合上书，看了你一眼，又低下头。
+沈知霁|……你吃了吗。
+-> 还没|hub|||9
+-> 吃过了|hub|||3

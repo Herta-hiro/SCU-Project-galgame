@@ -1,0 +1,21 @@
+# ---- 构建产物 ----
+*.exe
+*.o
+*.obj
+
+# ---- 运行期生成 ----
+save[0-9].sav
+data/cache/
+data/ai.conf
+prompt-preview.json
+shot.png
+bg_debug.log
+
+# ---- 开发过程的全量备份（三份快照，不属于版本控制） ----
+_backup/
+
+# ---- 截图：保留最终展示图，中间验证图不入库 ----
+shots/*/
+!shots/backgrounds/
+shots/backgrounds/*
+!shots/backgrounds/contact-sheet.png
