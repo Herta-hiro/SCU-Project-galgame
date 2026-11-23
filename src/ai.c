@@ -25,6 +25,10 @@
 #define AI_USER_ESC      2400
 #define AI_BODY_SIZE    64000
 
+/* 提示词模板的版本号。改了下面的模板就要 +1，否则同一分支还会命中旧缓存，
+   让人以为"改了没生效"。 */
+#define PROMPT_VERSION  2
+
 /* 角色卡没写 offlineN 时的最后兜底。故意不带人名，
    只做“她没抬头、馆里很安静”这类中性动作，任何角色都能用。 */
 static const char *OFFLINE_FALLBACK =
@@ -159,11 +163,13 @@ int ai_build_request_json(const AiPrompt *p, char *out, int out_size)
              "3. 用「动作/神态 + 1-2 句台词」写%s的反应；阶段 2 之后可到 3 句。\n"
              "4. 若行为触发阶段晋升条件，写一个她态度微变的细节（多看你一眼、多说半句、把杯子挪近半寸），但不点破。\n"
              "5. 不替玩家行动，不输出选项，不写心理独白。\n"
-             "6. 每行严格写成「%s：内容」或「旁白：内容」；一共 3 到 5 行。\n"
-             "7. 最后单独一行输出状态栏，格式固定：\n"
-             "   【好感：x/100｜阶段：x｜记忆：新增信息｜判定：+x/-x，原因】\n"
-             "   判定必须是带正负号的整数（+2、-3 这种），引擎按它结算好感增减。\n"
-             "   这一行引擎会隐藏，玩家看不到，但必须输出。",
+             "6. 每行严格写成「%s：内容」或「旁白：内容」；一共 3 到 5 行。\n\n"
+             "输出必须长这样，最后一行是状态栏，不能省：\n"
+             "%s：……嗯。\n"
+             "旁白：她把书往自己那边收了收。\n"
+             "【好感：22/100｜阶段：1｜记忆：他提了借阅单｜判定：+1，守规矩】\n\n"
+             "状态栏由引擎读走、对玩家隐藏，不会出现在剧情里；「判定」只写一个带正负号的整数"
+             "（+2、-3），引擎按它结算好感。缺了这一行，这次回答就算没写完。",
              p->character_name[0] ? p->character_name : "她",
              p->persona,
              p->affection,
@@ -178,6 +184,7 @@ int ai_build_request_json(const AiPrompt *p, char *out, int out_size)
              p->rules,
              p->stage_tone,
              p->events,
+             p->character_name[0] ? p->character_name : "她",
              p->character_name[0] ? p->character_name : "她",
              p->character_name[0] ? p->character_name : "她");
 
@@ -286,11 +293,12 @@ static unsigned int fnv1a(const char *s)
 
 static void cache_path(const AiPrompt *p, char *out, int size)
 {
-    /* 缓存键包含人设、场景、阶段、玩家台词：改任何一项都会重新生成，
-       不会出现“人设改了但还在读旧缓存”的错觉。 */
+    /* 缓存键包含人设、场景、阶段、玩家台词、好感，外加提示词模板的版本号。
+       前几项改了会重新生成；模板改了要手动把 PROMPT_VERSION 加一，
+       否则同一分支还会命中旧缓存，看起来像"改了没生效"。 */
     char key[8192];
-    snprintf(key, sizeof(key), "%s|%s|%s|%s|%s|%d",
-             p->character_id, p->persona, p->scene, p->stage,
+    snprintf(key, sizeof(key), "v%d|%s|%s|%s|%s|%s|%d",
+             PROMPT_VERSION, p->character_id, p->persona, p->scene, p->stage,
              p->user_input, p->affection);
     snprintf(out, (size_t)size, CACHE_DIR "/%08x.txt", fnv1a(key));
 }
