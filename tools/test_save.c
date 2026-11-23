@@ -1,5 +1,8 @@
 /* 存档 / 读档的离线单元测试。不依赖 raylib，可直接编译运行。
-   编译: gcc tools/test_save.c src/script.c src/save.c src/util.c -Isrc -o test_save.exe */
+   编译: gcc tools/test_save.c src/script.c src/save.c src/util.c -Isrc -o test_save.exe
+
+   注意：测试会占用（并先清空）当前目录的 save0~2.sav。要在 gal 根目录跑
+   （它要读 data/main.gal），所以别在放着真实存档的目录里跑。 */
 
 #include "game.h"
 #include <stdio.h>
@@ -13,9 +16,22 @@ static void check(const char *name, int cond)
     if (!cond) failures++;
 }
 
+/* 槽位是磁盘上的共享状态：上一次跑留下的存档会让"空槽位应该失败"这类断言
+   莫名其妙地红。每次开跑先清干净，测试就不再依赖环境。 */
+static void clear_slots(void)
+{
+    for (int i = 0; i < SAVE_SLOTS; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "save%d.sav", i);
+        remove(path);
+    }
+}
+
 int main(void)
 {
     static Game g;
+
+    clear_slots();
 
     if (!script_load(&g, "data/main.gal")) {
         printf("剧本加载失败\n");

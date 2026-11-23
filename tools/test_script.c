@@ -177,7 +177,16 @@ int main(void)
 
         check("main.gal 能加载",        ok == 1);
         check("main.gal 解析 0 错误",   script_error_count() == 0);
-        check("节点数 72",             g.node_count == 72);
+
+        /* 不要断言节点总数——加一章剧情就会红一次，那是数据在长，不是代码坏了。
+           改成断言"关键节点都在"，加内容不受影响。 */
+        check("起点节点在",             script_find(&g, "start") >= 0);
+        check("第二章 hub 在",          script_find(&g, "hub") >= 0);
+        check("结局节点 ch2_end 在",     script_find(&g, "ch2_end") >= 0);
+
+        int end = script_find(&g, "ch2_end");
+        check("结局节点没有选项（显示完即本章结束）",
+              end >= 0 && g.nodes[end].choice_count == 0);
 
         int start = script_find(&g, "start");
         check("start 节点存在",        start >= 0);
