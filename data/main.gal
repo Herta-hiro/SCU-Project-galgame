@@ -478,13 +478,13 @@
 :: d4_yes
 |她沉默了几秒，把帆布包换到另一只手。
 沈知霁|明天……你还来吗。
--> （点头）|route_end||6
+-> （点头）|h1_shield||6
 
 :: d4_no
 |她后退了半步。
 沈知霁|说了想一下。
 |然后转身往台阶下走。
--> （站在原地）|route_end||0
+-> （站在原地）|h1_shield||0
 
 # ---------------- 天府馆支线：E 类 ----------------
 
@@ -767,3 +767,122 @@
 沈知霁|……你吃了吗。
 -> 还没|hub||9
 -> 吃过了|hub||3
+
+# ---------------- 心动期收束：H 类（D4 之后） ----------------
+# 设计稿里的 C1–C9。D4 内部 +15/+6 会把好感直接推到 92–100，
+# 按好感开窗会被跳过甚至直接撞进结局，所以不走 hub 路由：
+# d4_yes / d4_no 接进 h1，一天一件事顺下来（选项沿用 hub 的「安静坐下」），
+# 最后一件演完自动进结局，不再回循环。
+
+:: h1_shield
+@once H1
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+@event H1 立起来的书
+|第二天，你到的时候她已经在了。
+|她把书立在面前，一个下午没翻过一页。
+|你摊开的书，停在112页。
+-> 安静坐下，看自己的书|h2_tissue||2
+-> （不提昨天）|h2_tissue||3
+
+:: h2_tissue
+@once H2
+@bg bg_lib_window
+@char shenzhiji:down
+@loc 省图三楼社科区靠窗
+@event H2 你那一侧的纸巾
+|又一天。你那一侧，多了一包纸巾。
+|她没抬头。笔尖走得很稳。
+-> 谢谢|h3_sleep||4
+-> （收进包里）|h3_sleep||2
+
+:: h3_sleep
+@once H3
+@bg bg_lib_window
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event H3 睡着的下午
+|下午三点，她的头一点一点。书立在面前。
+|她睡着了。呼吸很轻。
+-> （把窗帘拉下来一点）|h4_umbrella||5
+-> （继续看自己的书）|h4_umbrella||3
+
+:: h4_umbrella
+@once H4
+@bg bg_rain_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event H4 又忘在前台的伞
+|下雨。伞又忘在前台。
+|你取回来，立在两个人中间的桌腿边。
+-> 带上吧|h5_book||4
+-> （立在那儿，回座位）|h5_book||3
+
+:: h5_book
+@once H5
+@bg bg_lib_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@event H5 停在112页的书
+|你摊开的书，还是停在112页。
+|她看了一眼。没有说话。
+-> 安静坐下，看自己的书|h6_window||3
+-> （看向窗外）|h6_window||2
+
+:: h6_window
+@once H6
+@bg bg_lib_window
+@char shenzhiji:normal
+@loc 省图三楼社科区靠窗
+@event H6 关小的窗
+|你打了个喷嚏。
+|她把窗子关小了一点。没有回头。
+-> 谢谢|h7_cup||5
+-> （把外套拉链拉上）|h7_cup||3
+
+:: h7_cup
+@once H7
+@bg bg_lib_window
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event H7 桌子中间的杯子
+|她把水杯放到了桌子中间。
+|然后继续看书。
+-> （把自己的杯子也放到中间）|h8_pause||5
+-> （没动）|h8_pause||3
+
+:: h8_pause
+@once H8
+@bg bg_rain_window
+@char shenzhiji:look
+@loc 省图三楼社科区靠窗
+@event H8 没说完的话
+|下雨。她背好包，站起来，在桌边停了一下。
+|她张了张嘴。
+沈知霁|……伞。
+-> （把伞拿上）|h9_closing||4
+-> （不追问）|h9_closing||3
+
+:: h9_closing
+@once H9
+@bg bg_lib_night
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+@event H9 闭馆音乐
+|闭馆音乐响了。
+|她翻了一页。
+-> （你也翻了一页）|ch2_end||3
+-> （开始收东西，又放下）|ch2_end||2
+
+# 结局：没有选项，显示完引擎自动出「本章结束」。
+:: ch2_end
+@bg bg_lib_night
+@char shenzhiji:soft
+@loc 省图三楼社科区靠窗
+|又一天。闭馆前，你那一侧的灯先灭了。
+|你合上了那本书。
+|你没有走。
+|你把椅子搬到了她那一侧。
+|她翻页的手，停了停。
+|她把书往你那边推了推。
