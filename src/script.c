@@ -676,3 +676,122 @@ void choice_split_ai(const Choice *c, char *char_id, int char_size,
         copy_str(char_id, char_size, p);
     }
 }
+
+/* ---------------- 模型回复 ---------------- */
+
+/* 状态栏长这样：
+     【好感：55/100｜阶段：2｜记忆：玩家问了索引｜判定：+2，资料相关】
+   判定值要取出来给引擎用（以前是直接丢掉，等于模型白判）。
+   认三种开头：以【起行、含「｜判定」、或同时含「判定：」和「好感」。 */
+static int is_status_line(const char *s)
+{
+    if (strncmp(s, "【", 3) == 0) return 1;
+    if (strstr(s, "｜判定")) return 1;
+    if (strstr(s, "判定：") && strstr(s, "好感")) return 1;
+    return 0;
+}
+
+/* 从状态栏取判定增减。取不到返回 0 且 *found = 0。
+   模型会写 +2 / 2 / ＋2 / −X / + 2 这些变体，都认。 */
+static int parse_judgement(const char *s, int *found)
+{
+    const char *p;
+    *found = 0;
+
+    p = strstr(s, "判定：");
+    if (p) {
+        p += 9;                       /* 「判定：」= 2 汉字 + 全角冒号 */
+    } else {
+        p = strstr(s, "判定:");
+        if (!p) return 0;
+        p += 7;                       /* 「判定:」= 2 汉字 + 半角冒号 */
+    }
+
+    while (*p == ' ' || *p == '\t') p++;
+
+    int sign = 1;
+    if (*p == '+') {
+        p++;
+    } else if (*p == '-') {
+        sign = -1; p++;
+    } else if (strncmp(p, "＋", 3) == 0) {      /* U+FF0B */
+        p += 3;
+    } else if (strncmp(p, "－", 3) == 0) {      /* U+FF0D */
+        sign = -1; p += 3;
+    } else if (strncmp(p, "−", 3) == 0) {       /* U+2212 减号 */
+        sign = -1; p += 3;
+    }
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p < '0' || *p > '9') return 0;
+
+    int v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (*p - '0');
+        if (v > 999) { v = 999; break; }
+        p++;
+    }
+
+    *found = 1;
+    return sign * v;
+}
+
+int parse_reply(const char *reply, Node *out, int *judgement)
+{
+    int found = 0;
+
+    if (judgement) *judgement = 0;
+    if (!reply || !out) return 0;
+
+    out->line_count = 0;
+    const char *p = reply;
+
+    while (*p && out->line_count < MAX_LINES) {
+        const char *nl = strchr(p, '\n');
+        int len = nl ? (int)(nl - p) : (int)strlen(p);
+
+        if (len > 0) {
+            char buf[MAX_TEXT];
+            if (len >= MAX_TEXT) len = MAX_TEXT - 1;
+            memcpy(buf, p, (size_t)len);
+            buf[len] = '\0';
+
+            int end = (int)strlen(buf);
+            while (end > 0 && (buf[end - 1] == '\r' || buf[end - 1] == ' '))
+                buf[--end] = '\0';
+
+            if (buf[0]) {
+                if (is_status_line(buf)) {
+                    int f = 0;
+                    int v = parse_judgement(buf, &f);
+                    if (f) {
+                        found = 1;
+                        if (judgement) *judgement = v;
+                    }
+                    goto next_line;      /* 状态栏只给引擎看 */
+                }
+
+                Line *ln = &out->lines[out->line_count++];
+                char *colon = strstr(buf, "：");      /* 全角冒号占 3 字节 */
+                int   cw    = 3;
+
+                if (!colon) { colon = strchr(buf, ':'); cw = 1; }
+
+                if (colon) {
+                    *colon = '\0';
+                    copy_str(ln->speaker, (int)sizeof(ln->speaker), buf);
+                    copy_str(ln->text, (int)sizeof(ln->text), colon + cw);
+                } else {
+                    ln->speaker[0] = '\0';
+                    copy_str(ln->text, (int)sizeof(ln->text), buf);
+                }
+            }
+        }
+
+    next_line:
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    return found;
+}

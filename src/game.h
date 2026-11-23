@@ -182,6 +182,12 @@ void choice_split_ai(const Choice *c, char *char_id, int char_size,
 /* 选项在当前好感度下是否显示（第六列条件） */
 int  choice_visible(const Choice *c, int affinity);
 
+/* 模型回复的解析：把返回的文本拆成若干行台词，顺便取状态栏里的判定值。
+   和剧本一样是「文本 → 台词行」，所以放在 script.c 里，共用同一套测试。
+   返回值 1 表示找到了状态栏并取到了判定，*judgement 才是有效值；
+   返回 0 时 *judgement 为 0（离线兜底台词就没有状态栏）。 */
+int parse_reply(const char *reply, Node *out, int *judgement);
+
 /* save.c */
 int save_write(const Game *g, int slot);
 int save_read(Game *g, int slot);

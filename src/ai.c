@@ -162,6 +162,7 @@ int ai_build_request_json(const AiPrompt *p, char *out, int out_size)
              "6. 每行严格写成「%s：内容」或「旁白：内容」；一共 3 到 5 行。\n"
              "7. 最后单独一行输出状态栏，格式固定：\n"
              "   【好感：x/100｜阶段：x｜记忆：新增信息｜判定：+x/-x，原因】\n"
+             "   判定必须是带正负号的整数（+2、-3 这种），引擎按它结算好感增减。\n"
              "   这一行引擎会隐藏，玩家看不到，但必须输出。",
              p->character_name[0] ? p->character_name : "她",
              p->persona,

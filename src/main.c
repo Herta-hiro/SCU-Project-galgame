@@ -100,52 +100,23 @@ static void start_line(Game *g)
 
 /* ---------------- AI 支线 ---------------- */
 
-/* 把模型返回的文本切成若干行，每行按「名字：内容」拆开 */
-void parse_reply(const char *reply, Node *out)
+/* 模型给的判定是"这一句话"的分量（通常 ±1~4），剧本里一场戏值 6~15 分。
+   乘 3 把两个量纲对齐，再夹住，免得模型抽风一次把好感推掉一个阶段。 */
+#define AI_JUDGE_SCALE 3
+#define AI_JUDGE_MAX  12
+
+static int g_ai_base_aff;      /* 本条分支剧本里写的好感，离线/取不到判定时用 */
+
+static void apply_affinity(Game *g, int delta);
+
+/* 把模型判定换算成实际好感增减。判定一般 ±1~4（它按自己的规则表打），
+   剧本里一场戏值 6~15，乘 3 对齐量纲；再夹到 ±12，免得某次抽风推掉一个阶段。 */
+static int delta_from_judgement(int judgement)
 {
-    out->line_count = 0;
-    const char *p = reply;
-
-    while (*p && out->line_count < MAX_LINES) {
-        const char *nl = strchr(p, '\n');
-        int len = nl ? (int)(nl - p) : (int)strlen(p);
-
-        if (len > 0) {
-            char buf[MAX_TEXT];
-            if (len >= MAX_TEXT) len = MAX_TEXT - 1;
-            memcpy(buf, p, (size_t)len);
-            buf[len] = '\0';
-
-            int end = (int)strlen(buf);
-            while (end > 0 && (buf[end - 1] == '\r' || buf[end - 1] == ' '))
-                buf[--end] = '\0';
-
-            if (buf[0]) {
-                /* 状态栏【好感：…｜阶段：…｜判定：…】只给引擎看，不显示给玩家 */
-                if (strncmp(buf, "【", 3) == 0 || strstr(buf, "｜判定") || strstr(buf, "判定："))
-                    goto next_line;
-
-                Line *ln = &out->lines[out->line_count++];
-                char *colon = strstr(buf, "：");      /* 全角冒号占 3 字节 */
-                int   cw    = 3;
-
-                if (!colon) { colon = strchr(buf, ':'); cw = 1; }
-
-                if (colon) {
-                    *colon = '\0';
-                    snprintf(ln->speaker, sizeof(ln->speaker), "%s", buf);
-                    snprintf(ln->text, sizeof(ln->text), "%s", colon + cw);
-                } else {
-                    ln->speaker[0] = '\0';
-                    snprintf(ln->text, sizeof(ln->text), "%s", buf);
-                }
-            }
-        }
-
-    next_line:
-        if (!nl) break;
-        p = nl + 1;
-    }
+    int d = judgement * AI_JUDGE_SCALE;
+    if (d >  AI_JUDGE_MAX) return  AI_JUDGE_MAX;
+    if (d < -AI_JUDGE_MAX) return -AI_JUDGE_MAX;
+    return d;
 }
 
 /* 把一句对话塞进“已知信息”，只保留最近若干条，满一行丢一行。 */
@@ -226,6 +197,9 @@ static void begin_ai_branch(Game *g, const Choice *c, const char *char_id, const
     g->ai_return_index = script_find(g, ret_id);
     if (g->ai_return_index < 0) g->ai_return_index = g->node_index;
 
+    /* 剧本第四列先存着：模型没给判定（离线、或状态栏写坏了）时用它兜底 */
+    g_ai_base_aff = c ? c->affinity : 1;
+
     g->ai_active = 0;
     g_ai_pending = 1;
     ai_request(&p);
@@ -233,9 +207,12 @@ static void begin_ai_branch(Game *g, const Choice *c, const char *char_id, const
 
 static void finish_ai_branch(Game *g)
 {
+    int judgement = 0;
+    int has_judge;
+
     memset(&g->ai_node, 0, sizeof(Node));
     snprintf(g->ai_node.id, sizeof(g->ai_node.id), "__ai");
-    parse_reply(ai_reply(), &g->ai_node);
+    has_judge = parse_reply(ai_reply(), &g->ai_node, &judgement);
 
     if (g->ai_node.line_count == 0) {
         g_ai_pending = 0;
@@ -244,6 +221,10 @@ static void finish_ai_branch(Game *g)
         start_line(g);
         return;
     }
+
+    /* 判定落地：以前这一行是被直接丢掉的，模型判了也白判。
+       在线时用模型给的分量，离线兜底台词没有状态栏，退回剧本第四列。 */
+    apply_affinity(g, has_judge ? delta_from_judgement(judgement) : g_ai_base_aff);
 
     g_ai_pending  = 0;
     g->ai_active  = 1;
@@ -300,7 +281,7 @@ static void handle_choice(Game *g)
     if (choice_is_ai(&n->choices[i])) {
         char cid[MAX_ID], rid[MAX_ID];
         choice_split_ai(&n->choices[i], cid, MAX_ID, rid, MAX_ID);
-        apply_affinity(g, n->choices[i].affinity);
+        /* 好感等生成结束再结算：模型会给出判定，见 finish_ai_branch */
         begin_ai_branch(g, &n->choices[i], cid, rid);
         return;
     }
@@ -549,12 +530,20 @@ int main(int argc, char **argv)
             "【好感：55/100｜阶段：2｜记忆：玩家问了索引｜判定：+2，资料相关】\n";
 
         Node tmp;
+        int  judgment = 0;
         memset(&tmp, 0, sizeof(tmp));
-        parse_reply(reply, &tmp);
+        int has = parse_reply(reply, &tmp, &judgment);
 
         printf("parsed lines=%d (状态栏应被丢弃)\n", tmp.line_count);
         for (int i = 0; i < tmp.line_count; i++)
             printf("  [%d] speaker=%s | text=%s\n", i, tmp.lines[i].speaker, tmp.lines[i].text);
+        printf("judgement=%d%s -> 实际好感增减 %d\n",
+               judgment, has ? "" : "（无状态栏，退回剧本第四列）",
+               has ? delta_from_judgement(judgment) : 0);
+
+        /* 顺手验证换算与夹取：+2 应该放成 +6，+9 应该被夹到 +12 */
+        printf("换算检查: +2 -> %d, +9 -> %d, -9 -> %d\n",
+               delta_from_judgement(2), delta_from_judgement(9), delta_from_judgement(-9));
         return 0;
     }
 
