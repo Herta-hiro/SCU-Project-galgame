@@ -483,6 +483,7 @@ int main(int argc, char **argv)
     const char *script_path = "data/main.gal";
     const char *seen_list = NULL;
     const char *history_seed = NULL;
+    int         check_mode = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc)      shot = argv[++i];
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) script_path = argv[++i];
@@ -493,6 +494,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--skip-sim") == 0 && i + 1 < argc) skip_sim = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--prompt") == 0) dump_prompt = 1;
         else if (strcmp(argv[i], "--parse-demo") == 0) parse_demo = 1;
+        else if (strcmp(argv[i], "--check") == 0) check_mode = 1;
     }
 
 #if defined(_WIN32)
@@ -504,6 +506,13 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("剧本已加载: %d 个节点 (%s)\n", g_game.node_count, script_path);
+
+    /* 校验模式：用引擎自己的解析器把数据跑一遍，语法错误已经逐行打到 stderr。
+       列语义只有解析器这一份实现，check_script.py 不再自己解释一遍。 */
+    if (check_mode) {
+        printf("CHECK: 节点 %d, 错误 %d\n", g_game.node_count, script_error_count());
+        return script_error_count() ? 1 : 0;
+    }
 
     int cards = characters_load("data/characters.gal");
     printf("角色卡已加载: %d 张\n", cards);

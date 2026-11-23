@@ -1,5 +1,6 @@
 #include "ai.h"
 #include "game.h"
+#include "contract.h"
 
 #include <stdio.h>
 #include <string.h>

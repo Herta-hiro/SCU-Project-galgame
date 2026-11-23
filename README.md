@@ -1,7 +1,13 @@
 # 秋日回声 — C 语言 Galgame 引擎
 
+[![ci](https://github.com/Herta-hiro/SCU-Project-galgame/actions/workflows/ci.yml/badge.svg)](https://github.com/Herta-hiro/SCU-Project-galgame/actions/workflows/ci.yml)
+
 课程作业演示项目。纯 C + raylib，自研剧本格式，支线对话由大模型生成。
 第一章场景：**成都 · 四川省图书馆三楼社科区**；女主：**沈知霁**（历史系大三，高冷慢热）。
+
+| 标题 | 选项 | 对话 |
+|---|---|---|
+| ![](shots/01-cover.png) | ![](shots/03-choices.png) | ![](shots/04-stage0.png) |
 
 ## 编译运行
 
@@ -14,6 +20,12 @@ sh build.sh          # MSYS2 UCRT64 的 gcc
 
 运行期需要 `libraylib.dll`、`glfw3.dll`、`libwinpthread-1.dll`，已经放在项目根目录，
 所以双击就能开，不依赖 PATH。
+
+改完剧本/角色卡先跑一遍校验（会调 `gal.exe --check`，所以先编译）：
+
+```sh
+sh build.sh && python tools/check_script.py
+```
 
 ## 操作
 
@@ -62,12 +74,13 @@ gal/
 │   ├── ai.conf           大模型配置（需自建）
 │   └── cache/            生成结果缓存
 ├── src/
-│   ├── game.h            核心数据结构与状态枚举
-│   ├── script.c          剧本解析、节点跳转
+│   ├── game.h            核心数据结构、上限宏、剧本解析入口
+│   ├── script.c          剧本解析（单行纯函数 + 加载）、节点跳转
 │   ├── character.c/.h    角色卡解析（人设从这里读）
+│   ├── contract.h        编译期契约：两处字节上限必须相等，不等就编译失败
 │   ├── bg.c/.h           背景图加载与铺屏（@bg 指向 data/backgrounds）
 │   ├── sprite.c/.h       立绘加载与摆放（@char 指向 data/sprites）
-│   ├── save.c            存档序列化（3 槽位 + 时间戳 + 预览）
+│   ├── save.c            存档序列化（3 槽位 + 时间戳 + 预览，单一校验入口）
 │   ├── ui.c              对话框、打字机、按码点折行
 │   ├── menu.c            标题 / 存读档 / 对话记录三个界面
 │   ├── ai.c              大模型接口：拼 prompt、SSE 解析、缓存、离线兜底
@@ -75,15 +88,15 @@ gal/
 │   ├── chinese_font_data.c  自动生成的字形码点表（6919 字）
 │   └── main.c            主循环与状态机
 ├── tools/
-│   ├── check_script.py   剧本 / 角色卡校验器（按引擎上限逐行查）
+│   ├── check_script.py   校验器：调引擎查语法，自己查引用与可达性
 │   ├── gen_backgrounds.py 背景图生成器（程序绘制，改配色重跑即可）
 │   ├── gen_sprites.py    立绘生成器（表情、发型、轮廓光）
 │   ├── gen_codepoints.py 重新生成码点表
-│   └── test_save.c       存档单元测试（16 项，无窗口可跑）
+│   ├── test_script.c     剧本解析单元测试（54 项，无窗口可跑）
+│   └── test_save.c       存档单元测试（22 项，无窗口可跑）
 ├── docs/
 │   └── 人设对话补写手册.md  ← 补人设和对话看这个
-├── shots/                各界面 / 各阶段预览截图
-└── shots/backgrounds/    场景截图 + contact-sheet.png（一张图看全部背景）
+└── shots/                各界面 / 各阶段预览截图（contact-sheet 见 backgrounds/）
 ```
 
 ## 剧本格式
@@ -100,22 +113,34 @@ gal/
 @toast （图书馆的钟走过一格。）  进这个节点时右上角冒一句提示
 说话人|台词                    一行台词
 |台词                         旁白
--> 选项文字|目标节点id          普通分支
--> 选项文字|@角色id:返回节点id   AI 支线分支
+-> 选项文字|目标|玩家话|好感|场景|条件   分支选项（见下）
 # 注释
 ```
 
 `@bg` 写在 `::` 后面即可；不写就沿用上一个节点的背景，跨场景时才需要换。
 
-AI 支线可以再带三列：**玩家这句话 | 本分支场景 | 好感度增减**，还能加第六列**出现条件**：
+选项最多六列，**前四列对普通分支和 AI 分支同义**：
 
 ```
--> 我就一杯白开水，放我这边|@shenzhiji:after_meet|我就带了杯白开水，放我自己这边。|成都秋雨天，省图三楼满座。|+3
--> 你等到闭馆了？|after_exam|||+2|aff>=46
+-> 选项文字|目标|玩家这句话|好感度增减|本分支场景|出现条件
 ```
 
-第六列写 `aff>=46` / `aff<=20` / `aff==0`，不满足时这个选项**不显示**（不是变灰）。
-后四列省略时用角色卡默认值；条件省略就是一直显示。
+| 列 | 作用 | 省略时 |
+|---|---|---|
+| 1 | 选项文字 | 必填 |
+| 2 | 目标节点；AI 支线写成 `@角色id:返回节点` | 必填 |
+| 3 | 玩家真正说出口的那句话，进提示词与「已知信息」 | 空 |
+| 4 | **好感度增减**，`+3` / `-5` | `+1` |
+| 5 | 场景覆盖，进提示词。**只有 AI 分支会读**，普通分支写了会报错 | 用角色卡 `scene` |
+| 6 | 出现条件 `aff>=46` / `aff<=20` / `aff==0` | 一直显示 |
+
+```
+-> 好，我注意|after_meet|好，我注意。书我不碰。|+2                      普通分支
+-> 你等到闭馆了？|after_exam||+2||aff>=46                              带条件
+-> 我就一杯白开水，放我这边|@shenzhiji:after_meet|我就带了杯白开水。|+3|成都秋雨天。   AI 支线
+```
+
+第六列不满足时这个选项**不显示**（不是变灰）。
 
 **好感度对玩家隐藏**：界面上不显示数值，只有她的态度变化。要看数值调试分支时，
 把 `src/ui.c` 顶部的 `SHOW_AFFINITY` 改成 1 重新编译，右上角就会出现。
@@ -144,11 +169,23 @@ offline0 沈知霁：椅子没人。                   ← 没配 key 时的兜�
 ## 写完先校验
 
 ```sh
-python tools/check_script.py
+sh build.sh && python tools/check_script.py
 ```
 
-按引擎里的真实上限检查行数、字节数、选项数、id 长度、跳转目标、AI 分支角色 id、
-以及哪些节点走不到。有错退出码 1。
+分两层，各管各的，不重复实现同一套规则：
+
+- **语法**问引擎自己（`gal.exe --check`）：列数和每列的含义、好感度写法、字节上限、`@` 指令拼写。
+  报错形如 `ERROR: 第 46 行: 第四列是好感度增减，要写成 +2 / -3，实际是「+2|成都…」`。
+- **跨行的事**由脚本查：节点引用、id 重复、路由门槛是否从上往下递减、哪些节点走不到、角色卡超长。
+
+有错退出码 1。只查一份剧本：`python tools/check_script.py data/main.gal`。
+
+两个离线单元测试，不依赖 raylib，CI 每次 push 都跑：
+
+```sh
+gcc -std=c11 -Isrc tools/test_script.c src/script.c src/save.c src/util.c -o test_script && ./test_script
+gcc -std=c11 -Isrc tools/test_save.c   src/script.c src/save.c src/util.c -o test_save   && ./test_save
+```
 
 ## 调试 / 截图模式
 
@@ -157,6 +194,7 @@ gal.exe --shot title                     # 标题
 gal.exe --shot game                      # 开局
 gal.exe --shot choices                   # 选项界面
 gal.exe --shot ai --node meet --aff 55   # 取该节点第一条 AI 分支，好感 55（阶段 2）
+gal.exe --check                          # 只解析剧本、报告语法错误，返回码非 0 表示有错
 gal.exe --prompt --node meet --aff 55    # 不开窗口，把这条分支的完整请求 JSON 写到 prompt-preview.json
 gal.exe --skip-sim 6                     # 模拟按住 Ctrl 快进 6 秒，打印落到哪一行
 ```

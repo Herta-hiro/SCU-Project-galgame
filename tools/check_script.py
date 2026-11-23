@@ -3,32 +3,25 @@
 """剧本 / 角色卡校验器。
 
 用法（在 gal 目录下）：
-    python tools/check_script.py
+    sh build.sh && python tools/check_script.py
     python tools/check_script.py data/main.gal data/characters.gal
 
-检查的是引擎里写死的那些上限：节点数、每个节点的行数、每行字节数、
-选项数、id 长度……超了不会崩，但会被静默截断或漏读，所以先在这里报出来。
+分工：
+  * **语法由引擎负责**——列数、列的含义、好感度写法、长度上限、@ 指令拼写，
+    全部交给 `gal.exe --check`，也就是剧本真正的解析器。这里不再自己解释一遍，
+    否则两边各有一份「第几列是什么」，迟早会分家（历史上真的分过一次）。
+  * **本脚本负责跨行的东西**——节点引用是否存在、id 是否重复、路由是否降序、
+    哪些节点走不到、角色卡的字段长度。
+
 退出码 0 = 没有错误（可能有警告），1 = 有错误。
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
-# ---- 与 src/game.h / src/character.h 保持一致 ----
-LIM = {
-    "MAX_NODES": 96,
-    "MAX_LINES": 16,
-    "MAX_TEXT": 512,       # 台词缓冲，最多 511 字节
-    "MAX_CHOICES": 4,
-    "MAX_ROUTES": 40,
-    "MAX_ID": 32,          # 节点 id，最多 31 字节
-    "SPEAKER": 40,         # 说话人，最多 39 字节
-    "CHOICE_TEXT": 80,     # 选项文字，最多 79 字节
-    "CHOICE_PROMPT": 160,
-    "CHOICE_SCENE": 160,
-}
-
+# ---- 与 src/character.h 保持一致（引擎不校验角色卡，只有这里管）----
 CARD_LIM = {
     "name": 40,
     "persona": 1600,
@@ -90,6 +83,30 @@ def blen(s):
     return len(s.encode("utf-8"))
 
 
+# ---------------- 引擎校验 ----------------
+
+def engine_check(script, rep):
+    """把剧本交给引擎自己的解析器跑一遍，语法错误全部由它报。"""
+    exe = Path("gal.exe")
+    if not exe.exists():
+        rep.note("没找到 gal.exe，**语法检查被跳过**（只做了引用与可达性检查）。"
+                 "先 `sh build.sh` 再校验。")
+        return False
+
+    try:
+        p = subprocess.run([str(exe.resolve()), "--check", "--script", str(script)],
+                           capture_output=True)
+    except OSError as e:
+        rep.note(f"调不动 gal.exe（{e}），语法检查被跳过")
+        return False
+
+    out = p.stdout.decode("utf-8", "replace") + p.stderr.decode("utf-8", "replace")
+    for line in out.splitlines():
+        if line.startswith("ERROR: "):
+            rep.errors.append("引擎 " + line[len("ERROR: "):])
+    return True
+
+
 # ---------------- 角色卡 ----------------
 
 def check_cards(path, rep):
@@ -108,8 +125,8 @@ def check_cards(path, rep):
                 rep.err(path, no, "角色卡 id 为空")
                 cur = None
                 continue
-            if blen(cid) >= LIM["MAX_ID"]:
-                rep.err(path, no, f"角色 id「{cid}」{blen(cid)} 字节，上限 {LIM['MAX_ID'] - 1}")
+            if blen(cid) >= 32:
+                rep.err(path, no, f"角色 id「{cid}」{blen(cid)} 字节，上限 31")
             if cid in seen:
                 rep.warn(path, no, f"角色 id「{cid}」重复，后一张会覆盖查找结果")
             seen.add(cid)
@@ -160,7 +177,20 @@ def check_cards(path, rep):
     return cards
 
 
-# ---------------- 剧本 ----------------
+# ---------------- 剧本：只做跨行的检查 ----------------
+
+def split_choice(body):
+    return body.split("|")
+
+
+def route_threshold(cond):
+    """把 `aff>=46` / `aff>45` 折成"最低好感"的整数，其它写法返回 None。"""
+    m = re.fullmatch(r"(?:aff)?\s*(>=|>)\s*(\d+)", cond.strip())
+    if not m:
+        return None
+    v = int(m.group(2))
+    return v if m.group(1) == ">=" else v + 1
+
 
 def check_script(path, cards, rep):
     nodes = {}
@@ -179,68 +209,15 @@ def check_script(path, cards, rep):
                 rep.err(path, no, "节点 id 为空")
                 cur = None
                 continue
-            if blen(nid) >= LIM["MAX_ID"]:
-                rep.err(path, no, f"节点 id「{nid}」{blen(nid)} 字节，上限 {LIM['MAX_ID'] - 1}")
             if nid in nodes:
                 rep.err(path, no, f"节点 id「{nid}」重复，前面那个会被后面覆盖")
-            cur = {"id": nid, "line": no, "lines": 0, "choices": [], "routes": [], "next": None}
+            cur = {"id": nid, "line": no, "choices": [], "routes": []}
             nodes[nid] = cur
             order.append(nid)
-            if len(order) > LIM["MAX_NODES"]:
-                rep.err(path, no, f"节点数超过 {LIM['MAX_NODES']}，后面的节点读不进来")
             continue
 
         if cur is None:
             rep.err(path, no, "内容写在第一个 :: 节点之前，会被忽略")
-            continue
-
-        if line.startswith("@loc"):
-            name = line[4:].strip()
-            cur["loc"] = name
-            if blen(name) >= 64:
-                rep.err(path, no, f"地点「{name}」超过 63 字节，会被截断")
-            continue
-
-        if line.startswith("@event"):
-            name = line[6:].strip()
-            cur["event"] = name
-            if blen(name) >= 256:
-                rep.err(path, no, f"事件描述「{name}」超过 255 字节，会被截断")
-            continue
-
-        if line.startswith("@toast"):
-            txt = line[6:].strip()
-            cur["toast"] = txt
-            if blen(txt) >= 64:
-                rep.err(path, no, f"@toast「{txt}」超过 63 字节，会被截断")
-            continue
-
-        if line.startswith("@once"):
-            spec = line[5:].strip()
-            if not re.fullmatch(r"[A-Za-z](1[0-5]|[1-9])", spec):
-                rep.err(path, no, f"@once 应写成 A1 / B3 / G6 这种（字母 A-Z + 1-15），实际是「{spec}」")
-            cur.setdefault("once", []).append(spec)
-            continue
-
-        if line.startswith("@offline"):
-            txt = line[8:].strip()
-            cur.setdefault("offline", []).append(txt)
-            continue
-
-        if line.startswith("@char"):
-            spec = line[5:].strip()
-            cur["char"] = spec
-            if blen(spec) >= 48:
-                rep.err(path, no, f"立绘写法「{spec}」超过 47 字节，会被截断")
-            continue
-
-        if line.startswith("@bg"):
-            name = line[3:].strip()
-            cur["bg"] = name
-            if not name:
-                rep.err(path, no, "@bg 后面没写背景名")
-            elif blen(name) >= 32:
-                rep.err(path, no, f"背景名「{name}」超过 31 字节，会被截断")
             continue
 
         if line.startswith("=>"):
@@ -249,77 +226,42 @@ def check_script(path, cards, rep):
             if len(parts) < 2:
                 rep.err(path, no, "路由写法应为「=> aff>=46 目标节点」")
                 continue
-            cur["routes"].append({"line": no, "cond": parts[0].strip(), "target": parts[1].strip()})
+            cur["routes"].append({"line": no, "cond": parts[0].strip(),
+                                  "target": parts[1].strip()})
             continue
 
         if line.startswith("->"):
             body = line[2:].strip()
-            fields = body.split("|")
+            fields = split_choice(body)
             if len(fields) < 2:
                 rep.err(path, no, "选项缺目标：应写成「-> 文字|目标节点」")
                 continue
-            if len(fields) > 6:
-                rep.err(path, no, f"选项有 {len(fields)} 列，引擎只认 6 列（多出来的会算进好感度一栏）")
             cur["choices"].append({"line": no, "fields": fields})
             continue
 
+        if line.startswith("@"):
+            parts = line[1:].split(None, 1)
+            key = parts[0] if parts else ""
+            val = parts[1].strip() if len(parts) > 1 else ""
+            if key == "bg":
+                cur["bg"] = val
+            elif key == "char":
+                cur["char"] = val
+            continue
+
         total_lines += 1
-        cur["lines"] += 1
-        if cur["lines"] > LIM["MAX_LINES"]:
-            rep.err(path, no, f"节点「{cur['id']}」超过 {LIM['MAX_LINES']} 行，多出来的行会被丢弃")
 
-        if "|" in line:
-            speaker, text = line.split("|", 1)
-            if blen(speaker) >= LIM["SPEAKER"]:
-                rep.err(path, no, f"说话人「{speaker}」{blen(speaker)} 字节，上限 {LIM['SPEAKER'] - 1}")
-        else:
-            text = line
-
-        if blen(text) >= LIM["MAX_TEXT"]:
-            rep.err(path, no, f"台词 {blen(text)} 字节，上限 {LIM['MAX_TEXT'] - 1}，会被截断")
-
-    # 选项引用与长度
+    # 选项引用是否存在（语法由引擎管，这里只查引用）
     for nid, n in nodes.items():
-        if len(n["choices"]) > LIM["MAX_CHOICES"]:
-            rep.err(path, n["line"],
-                    f"节点「{nid}」有 {len(n['choices'])} 个选项，上限 {LIM['MAX_CHOICES']}，多的会被丢弃")
-
         for ch in n["choices"]:
             f = ch["fields"]
-            text = f[0]
             target = f[1].strip()
-            if blen(text) >= LIM["CHOICE_TEXT"]:
-                rep.err(path, ch["line"],
-                        f"选项文字「{text}」{blen(text)} 字节，上限 {LIM['CHOICE_TEXT'] - 1}")
-            if blen(target) >= LIM["MAX_ID"] and not target.startswith("@"):
-                rep.err(path, ch["line"], f"目标 id「{target}」{blen(target)} 字节，上限 {LIM['MAX_ID'] - 1}")
-
-            if len(f) > 2 and blen(f[2]) >= LIM["CHOICE_PROMPT"]:
-                rep.err(path, ch["line"], "第三列（玩家这句话）超长，会被截断")
-            if len(f) > 3 and blen(f[3]) >= LIM["CHOICE_SCENE"]:
-                rep.err(path, ch["line"], "第四列（场景）超长，会被截断")
-            if len(f) > 4:
-                delta = f[4].strip()
-                if not re.fullmatch(r"[+-]?\d+", delta):
-                    rep.err(path, ch["line"], f"第五列好感度「{delta}」不是整数，会被当成 0")
-                elif abs(int(delta)) > 20:
-                    rep.warn(path, ch["line"], f"好感度一次变动 {delta}，建议不超过 ±20")
-
-            if len(f) > 5:
-                cond = f[5].strip()
-                if cond and not re.fullmatch(r"(aff)?\s*(>=|<=|==|=|>|<)\s*\d+", cond):
-                    rep.err(path, ch["line"],
-                            f"第六列条件「{cond}」写法不对，应写成 aff>=46 / aff<=20 / aff==0")
-                else:
-                    m2 = re.search(r"(>=|<=|==|=|>|<)\s*(\d+)", cond)
-                    if m2 and not (0 <= int(m2.group(2)) <= 100):
-                        rep.warn(path, ch["line"],
-                                 f"好感度条件 {cond} 超出 0-100，这个选项可能永远不出现")
 
             if target.startswith("@"):
                 m = re.fullmatch(r"@([^:]+)(?::(.+))?", target)
                 if not m:
-                    rep.err(path, ch["line"], f"AI 分支写法应为 @角色id:返回节点，实际是「{target}」")
+                    rep.err(path, ch["line"],
+                            f"AI 分支写法应为 @角色id:返回节点，实际是「{target}」")
                     continue
                 char_id, ret = m.group(1), m.group(2)
                 if cards is not None and char_id not in cards:
@@ -331,27 +273,32 @@ def check_script(path, cards, rep):
             elif target not in nodes:
                 rep.err(path, ch["line"], f"选项指向的节点「{target}」不存在")
 
-    # 自动路由：条数、条件写法、目标存在
+            # 内容规范：一次加太多会让阶段跳得太快，属于写法建议不是错误
+            if len(f) > 3:
+                delta = f[3].strip()
+                if re.fullmatch(r"[+-]?\d+", delta) and abs(int(delta)) > 20:
+                    rep.warn(path, ch["line"], f"好感度一次变动 {delta}，建议不超过 ±20")
+
+    # 自动路由：目标存在、不要指回自己、门槛必须从上往下递减
     for nid, n in nodes.items():
-        rs = n.get("routes", [])
-        if len(rs) > LIM["MAX_ROUTES"]:
-            rep.err(path, n["line"],
-                    f"节点「{nid}」有 {len(rs)} 条路由，上限 {LIM['MAX_ROUTES']}")
+        rs = n["routes"]
         for r in rs:
-            cond, tgt = r["cond"], r["target"]
-            if not re.fullmatch(r"(aff)?\s*(>=|<=|==|=|>|<)\s*\d+", cond):
-                rep.err(path, r["line"], f"路由条件「{cond}」写法不对，应写成 aff>=46")
+            tgt = r["target"]
             if tgt not in nodes:
                 rep.err(path, r["line"], f"路由指向的节点「{tgt}」不存在")
             elif tgt == nid:
                 rep.warn(path, r["line"], f"路由指回自己（{nid}），会直接停在原地")
 
-    # @offline 兜底台词长度
-    for nid, n in nodes.items():
-        of = "\n".join(n.get("offline", []))
-        if of and blen(of) >= 600:
-            rep.err(path, n["line"],
-                    f"节点「{nid}」的 @offline 累计 {blen(of)} 字节，上限 599，会被截断")
+        ths = []
+        for r in rs:
+            t = route_threshold(r["cond"])
+            if t is not None:
+                ths.append((t, r["line"], r["cond"]))
+        for prev, nxt in zip(ths, ths[1:]):
+            if nxt[0] > prev[0]:
+                rep.err(path, nxt[1],
+                        f"门槛「{nxt[2]}」比上一条「{prev[2]}」高；"
+                        f"路由从上往下取第一条命中的，这条永远轮不到")
 
     # 背景图是否存在
     bgdir = Path(path).resolve().parent / "backgrounds"
@@ -388,7 +335,7 @@ def check_script(path, cards, rep):
             if nid in seen or nid not in nodes:
                 continue
             seen.add(nid)
-            for r in nodes[nid].get("routes", []):
+            for r in nodes[nid]["routes"]:
                 stack.append(r["target"])
             for ch in nodes[nid]["choices"]:
                 tgt = ch["fields"][1].strip()
@@ -414,6 +361,9 @@ def main(argv):
 
     if not script.exists():
         raise SystemExit(f"找不到剧本：{script}")
+
+    engine_check(script, rep)
+
     if not cards_path.exists():
         print(f"提示：{cards_path} 不存在，跳过角色卡检查（游戏会用内置默认人设）")
         cards = None
@@ -424,7 +374,6 @@ def main(argv):
 
     print(f"剧本: {script}  节点 {len(nodes)} 个，台词/旁白 {total_lines} 行")
     print(f"角色卡: {cards_path}  角色 {len(cards) if cards else 0} 张")
-    print("上限:", ", ".join(f"{k}={v}" for k, v in LIM.items()))
     print()
     return rep.dump()
 

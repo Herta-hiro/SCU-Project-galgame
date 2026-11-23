@@ -13,6 +13,10 @@
 #define MAX_LOG     128
 #define MAX_ROUTES   40
 
+/* 事件编号占的格子数：id = 字母下标*16 + 数字，字母 A-Z、数字 1-15。
+   seen[] 的长度、event_id_of() 的上界、存档布局都引用这一个宏。 */
+#define EVENT_SLOTS  416
+
 /* 一行台词。speaker 为空表示旁白。 */
 typedef struct {
     char speaker[40];
@@ -22,11 +26,10 @@ typedef struct {
 /* 一个分支选项。target 以 '@' 开头表示进入 AI 支线，
    格式 "@角色id:返回节点id"。
 
-   剧本里一行最多六列：
-     -> 选项文字|目标|玩家这句话|本分支场景|好感度增减|出现条件
-   后四列都可省略。第三、四列只对 AI 分支有意义：它们决定提示词里的
-   “玩家说的那句话”和“当前场景”，不写就用角色卡里的默认值。
-   第六列是显示条件，写法：
+   剧本里一行最多六列，**前四列对所有分支同义**：
+     -> 选项文字|目标|玩家这句话|好感度增减|本分支场景|出现条件
+   第 5 列的场景只对 AI 分支有意义（普通分支存了也不读）；
+   第 6 列是显示条件：
      aff>=46   好感度到 46 才出现
      aff>70    …
      aff<=20   …
@@ -35,9 +38,9 @@ typedef struct {
 typedef struct {
     char text[80];
     char target[MAX_ID];
-    char prompt[160];    /* 第三列：玩家这句话 */
-    char scene[160];     /* 第四列：场景覆盖 */
-    int  affinity;       /* 第五列：好感度增减，缺省 1（保持旧的 +1 行为） */
+    char prompt[160];    /* 第三列：玩家这句话，进提示词与「已知信息」 */
+    char scene[160];     /* 第五列：场景覆盖，只有 AI 分支会读 */
+    int  affinity;       /* 第四列：好感度增减，缺省 1（保持旧的 +1 行为） */
     int  cond_min;       /* 第六列解析出的下限，默认 0 */
     int  cond_max;       /* 第六列解析出的上限，默认 100 */
 } Choice;
@@ -118,7 +121,7 @@ typedef struct {
     char spr[48];                /* 当前立绘，形如 "shenzhiji:soft" 或 "off" */
     char location[64];           /* 当前地点，喂给提示词 */
     char last_event[256];        /* 最近发生的事件，喂给提示词 */
-    unsigned char seen[416];     /* 已触发过的事件标记：id = 字母*16 + 数字，A1=17、G6=102 */
+    unsigned char seen[EVENT_SLOTS];  /* 已触发过的事件标记，下标 = 事件编号 */
     char event_history[1024];    /* 已经发生过的事件清单，进提示词，让她“记得” */
     int  event_entry_aff;        /* 进当前节点时的好感度：负分不会把你打回这一场之前 */
     unsigned int enter_seq;      /* 每次进节点 +1，用来判断“又进了一次同一个节点” */
@@ -142,10 +145,30 @@ typedef struct {
 
 /* 剧本 */
 int  event_id_of(const char *s);   /* "A2" -> 12，用于 @once */
+
+/* 剧本解析的单行入口：只做词法和装配，不碰文件、不改全局状态。
+   这是唯一一处「文本怎么写 → 结构体怎么填」的实现，校验器和测试都走它。 */
+typedef enum {
+    SL_SKIP = 0,   /* 空行 / 注释 */
+    SL_NODE,       /* :: 节点id */
+    SL_CHOICE,     /* -> 选项 */
+    SL_ROUTE,      /* => 自动路由 */
+    SL_META,       /* @bg / @char / @loc / @event / @offline / @once / @toast */
+    SL_LINE,       /* 台词或旁白 */
+    SL_ERROR       /* 语法错误，原因写进 err */
+} ScriptLineKind;
+
+ScriptLineKind script_parse_line(const char *line, Node *n, char *err, int err_size);
+
 int  script_load(Game *g, const char *path);
+int  script_error_count(void);     /* 上次 script_load 里报的行级错误数 */
 int  script_find(const Game *g, const char *id);
 void game_enter_node(Game *g, const char *id);
 void game_enter_index(Game *g, int index);
+
+/* 只把节点状态铺开，不跑自动路由。读档用：存档里记的已经是路由之后的节点，
+   再跑一次会被当前好感度带到别处去。 */
+void game_restore_index(Game *g, int index);
 int  game_advance(Game *g);
 const Node *game_current_node(const Game *g);
 const Line *game_current_line(const Game *g);

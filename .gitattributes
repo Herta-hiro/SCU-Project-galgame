@@ -1,0 +1,10 @@
+# 文本统一存 LF，Windows 上检出也是 LF；只有 .bat 需要 CRLF，否则 cmd 会读串行。
+* text=auto eol=lf
+
+*.bat  text eol=crlf
+
+*.png  binary
+*.jpg  binary
+*.dll  binary
+*.exe  binary
+*.sav  binary

@@ -6,14 +6,29 @@
 
 /* 剧本格式（UTF-8，扩展名 .gal）
  *
- *   :: 节点id                 开一个新节点
- *   说话人|台词                一行台词
- *   |台词                     旁白（说话人为空）
- *   -> 选项文字|目标节点id      节点末的分支选项
+ *   :: 节点id                       开一个新节点
+ *   说话人|台词                      一行台词
+ *   |台词                           旁白（说话人为空）
+ *   -> 选项文字|目标|玩家这句话|好感|本分支场景|出现条件
+ *                                   节点末的分支选项（前四列对普通分支和
+ *                                   AI 分支同义，场景只有 AI 分支会读）
+ *   => aff>=46 目标节点              进节点时按好感度自动跳
+ *   @bg / @char / @loc / @event / @offline / @once / @toast
  *   # 注释
  *
  * 台词里不允许出现半角竖线，需要时用全角｜。
+ *
+ * 这一层只做「一行文本 → 结构体字段」，不碰文件、不改全局状态。
+ * script_load() 负责 IO 和行号，校验器与单元测试都直接调 script_parse_line()。
  */
+
+static int g_err_count;
+
+static void report(int line_no, const char *msg)
+{
+    g_err_count++;
+    fprintf(stderr, "ERROR: 第 %d 行: %s\n", line_no, msg);
+}
 
 static void rtrim(char *s)
 {
@@ -31,12 +46,16 @@ static char *ltrim(char *s)
 
 static void copy_str(char *dst, int size, const char *src)
 {
+    size_t n;
     if (size <= 0) return;
-    strncpy(dst, src, (size_t)(size - 1));
-    dst[size - 1] = '\0';
+    n = strlen(src);
+    if (n >= (size_t)size) n = (size_t)size - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
 }
 
-/* 第六列 / 路由行：好感条件。支持 aff>=46 / aff>45 / aff<=20 / aff<21 / aff==0 */
+/* 好感条件解析。支持 aff>=46 / aff>45 / aff<=20 / aff<21 / aff==0，
+   也接受只写 >=46。语法层面的错由调用方先行拦截。 */
 static void parse_aff_cond(const char *s, int *pmin, int *pmax)
 {
     *pmin = 0;
@@ -68,11 +87,6 @@ static void parse_aff_cond(const char *s, int *pmin, int *pmax)
     if (*pmax > 100) *pmax = 100;
 }
 
-static void parse_condition(Choice *c, const char *s)
-{
-    parse_aff_cond(s, &c->cond_min, &c->cond_max);
-}
-
 int choice_visible(const Choice *c, int affinity)
 {
     if (!c) return 0;
@@ -81,8 +95,8 @@ int choice_visible(const Choice *c, int affinity)
     return 1;
 }
 
-/* 事件编号：A1=17、B3=35、F15=95……字母 A-F + 1~15 的数字。
-   用 16 进制分段，最多 96 个，正好对应 Game.seen 数组。 */
+/* 事件编号：A1=1、B1=17、G6=102……字母下标（A 从 0 起）× 16 + 1~15 的数字。
+   用 16 进制分段，最多 EVENT_SLOTS 个，正好对应 Game.seen 数组。 */
 int event_id_of(const char *s)
 {
     if (!s || !s[0] || !s[1]) return 0;
@@ -93,7 +107,7 @@ int event_id_of(const char *s)
     if (n <= 0 || n > 15) return 0;
 
     int id = l * 16 + n;
-    return (id > 0 && id < 416) ? id : 0;
+    return (id > 0 && id < EVENT_SLOTS) ? id : 0;
 }
 
 static void append_line(char *dst, int size, const char *src)
@@ -111,20 +125,330 @@ static void append_line(char *dst, int size, const char *src)
     dst[used + n] = '\0';
 }
 
+static int is_int_field(const char *s)
+{
+    if (*s == '+' || *s == '-') s++;
+    if (!*s) return 0;
+    for (; *s; s++)
+        if (!isdigit((unsigned char)*s)) return 0;
+    return 1;
+}
+
+/* 按 | 切列，最多 max 列。返回列数；超出的部分留在最后一列里，
+   由调用方检测（选项最多 6 列）。 */
+static int split_fields(char *body, char *f[], int max)
+{
+    int n = 0;
+    f[n++] = body;
+    char *p = body;
+    while (n < max) {
+        char *bar = strchr(p, '|');
+        if (!bar) break;
+        *bar = '\0';
+        p = bar + 1;
+        f[n++] = p;
+    }
+    return n;
+}
+
+static ScriptLineKind parse_choice(char *body, Node *n, char *err, int err_size)
+{
+    char *f[6] = { 0 };
+    int   nf = split_fields(body, f, 6);
+
+    if (nf == 6 && strchr(f[5], '|')) {
+        snprintf(err, (size_t)err_size, "选项最多 6 列，多出来的会被吞掉");
+        return SL_ERROR;
+    }
+    if (nf < 2) {
+        snprintf(err, (size_t)err_size, "选项至少要写「文字|目标节点」");
+        return SL_ERROR;
+    }
+
+    char *text   = f[0];
+    char *target = ltrim(f[1]);
+    rtrim(target);
+    rtrim(text);
+
+    if (!target[0]) {
+        snprintf(err, (size_t)err_size, "选项没写目标节点");
+        return SL_ERROR;
+    }
+    if (strlen(target) >= MAX_ID) {
+        snprintf(err, (size_t)err_size, "目标「%s」超过 %d 字节", target, MAX_ID - 1);
+        return SL_ERROR;
+    }
+
+    int aff = 1;
+    if (nf >= 4) {
+        char *a = ltrim(f[3]);
+        if (*a) {
+            if (!is_int_field(a)) {
+                snprintf(err, (size_t)err_size,
+                         "第四列是好感度增减，要写成 +2 / -3，实际是「%s」", a);
+                return SL_ERROR;
+            }
+            aff = atoi(a);
+        }
+    }
+
+    if (n->choice_count >= MAX_CHOICES) {
+        snprintf(err, (size_t)err_size, "选项超过 %d 个，多的被丢弃", MAX_CHOICES);
+        return SL_ERROR;
+    }
+
+    Choice *c = &n->choices[n->choice_count];
+    memset(c, 0, sizeof(*c));
+    copy_str(c->text,   (int)sizeof(c->text), text);
+    copy_str(c->target, MAX_ID, target);
+    if (nf >= 3) {
+        char *p = f[2];
+        rtrim(p);
+        copy_str(c->prompt, (int)sizeof(c->prompt), p);
+    }
+    c->affinity = aff;
+    if (nf >= 5) {
+        char *s = f[4];
+        rtrim(s);
+        if (s[0] && target[0] != '@') {
+            /* 普通分支没有场景可覆盖。这一列写了内容，多半是把好感写错了位置
+               （历史上真发生过：18 个选项的 +2/-3 全落在这里，被当成场景名丢掉）。 */
+            snprintf(err, (size_t)err_size,
+                     "普通分支的第五列要留空（好感写在第四列），实际是「%s」", s);
+            return SL_ERROR;
+        }
+        copy_str(c->scene, (int)sizeof(c->scene), s);
+    }
+    parse_aff_cond(nf >= 6 ? ltrim(f[5]) : NULL, &c->cond_min, &c->cond_max);
+
+    n->choice_count++;
+    return SL_CHOICE;
+}
+
+ScriptLineKind script_parse_line(const char *raw, Node *n, char *err, int err_size)
+{
+    char buf[MAX_TEXT + 128];
+
+    if (err && err_size > 0) err[0] = '\0';
+    if (!raw || !n) {
+        if (err && err_size > 0) snprintf(err, (size_t)err_size, "内部错误：空指针");
+        return SL_ERROR;
+    }
+    if (strlen(raw) >= sizeof(buf)) {
+        snprintf(err, (size_t)err_size, "这一行超过 %d 字节，请拆行", (int)sizeof(buf) - 1);
+        return SL_ERROR;
+    }
+    snprintf(buf, sizeof(buf), "%s", raw);
+
+    char *line = ltrim(buf);
+    rtrim(line);
+
+    if (!line[0] || line[0] == '#') return SL_SKIP;
+
+    /* :: 节点 */
+    if (line[0] == ':' && line[1] == ':') {
+        char *id = ltrim(line + 2);
+        rtrim(id);
+        if (!id[0]) {
+            snprintf(err, (size_t)err_size, "节点 id 是空的");
+            return SL_ERROR;
+        }
+        if (strlen(id) >= MAX_ID) {
+            snprintf(err, (size_t)err_size, "节点 id「%s」超过 %d 字节", id, MAX_ID - 1);
+            return SL_ERROR;
+        }
+        copy_str(n->id, MAX_ID, id);
+        return SL_NODE;
+    }
+
+    /* => 自动路由：`=> aff>=46 目标节点` */
+    if (line[0] == '=' && line[1] == '>') {
+        char *body = ltrim(line + 2);
+        char *sp = body;
+        while (*sp && *sp != ' ' && *sp != '\t') sp++;
+        if (!*sp) {
+            snprintf(err, (size_t)err_size, "路由要写成「=> aff>=46 目标节点」");
+            return SL_ERROR;
+        }
+        *sp = '\0';
+        char *target = ltrim(sp + 1);
+        rtrim(target);
+
+        if (!target[0]) {
+            snprintf(err, (size_t)err_size, "路由没写目标节点");
+            return SL_ERROR;
+        }
+        if (strlen(target) >= MAX_ID) {
+            snprintf(err, (size_t)err_size, "路由目标「%s」超过 %d 字节", target, MAX_ID - 1);
+            return SL_ERROR;
+        }
+        if (!strpbrk(body, "<>=")) {
+            snprintf(err, (size_t)err_size, "路由条件「%s」里没有比较符号", body);
+            return SL_ERROR;
+        }
+        if (n->route_count >= MAX_ROUTES) {
+            snprintf(err, (size_t)err_size, "路由超过 %d 条，多的被丢弃", MAX_ROUTES);
+            return SL_ERROR;
+        }
+
+        Route *r = &n->routes[n->route_count++];
+        parse_aff_cond(body, &r->cond_min, &r->cond_max);
+        copy_str(r->target, MAX_ID, target);
+        return SL_ROUTE;
+    }
+
+    /* -> 选项 */
+    if (line[0] == '-' && line[1] == '>') {
+        char *body = ltrim(line + 2);
+        return parse_choice(body, n, err, err_size);
+    }
+
+    /* @ 指令：按第一个词精确匹配，`@bgg` 这种拼错会报错而不是被当成 @bg */
+    if (line[0] == '@') {
+        char *body = ltrim(line + 1);
+        char *key  = body;
+        char *sp   = key;
+        while (*sp && *sp != ' ' && *sp != '\t') sp++;
+
+        char *val = sp;
+        if (*sp) {
+            *sp  = '\0';
+            val  = ltrim(sp + 1);
+            rtrim(val);
+        }
+
+        if (strcmp(key, "bg") == 0) {
+            if (!val[0]) {
+                snprintf(err, (size_t)err_size, "@bg 后面要写背景名");
+                return SL_ERROR;
+            }
+            if (strlen(val) >= sizeof(n->bg)) {
+                snprintf(err, (size_t)err_size, "@bg 名字超过 %d 字节", (int)sizeof(n->bg) - 1);
+                return SL_ERROR;
+            }
+            copy_str(n->bg, (int)sizeof(n->bg), val);
+            return SL_META;
+        }
+        if (strcmp(key, "char") == 0) {
+            if (!val[0]) {
+                snprintf(err, (size_t)err_size, "@char 后面要写「角色id:表情」或 off");
+                return SL_ERROR;
+            }
+            if (strlen(val) >= sizeof(n->spr)) {
+                snprintf(err, (size_t)err_size, "@char 写法超过 %d 字节", (int)sizeof(n->spr) - 1);
+                return SL_ERROR;
+            }
+            copy_str(n->spr, (int)sizeof(n->spr), val);
+            return SL_META;
+        }
+        if (strcmp(key, "loc") == 0) {
+            if (!val[0]) {
+                snprintf(err, (size_t)err_size, "@loc 后面要写地点");
+                return SL_ERROR;
+            }
+            if (strlen(val) >= sizeof(n->loc)) {
+                snprintf(err, (size_t)err_size, "@loc 超过 %d 字节", (int)sizeof(n->loc) - 1);
+                return SL_ERROR;
+            }
+            copy_str(n->loc, (int)sizeof(n->loc), val);
+            return SL_META;
+        }
+        if (strcmp(key, "event") == 0) {
+            if (!val[0]) {
+                snprintf(err, (size_t)err_size, "@event 后面要写事件描述");
+                return SL_ERROR;
+            }
+            if (strlen(val) >= sizeof(n->event)) {
+                snprintf(err, (size_t)err_size, "@event 超过 %d 字节", (int)sizeof(n->event) - 1);
+                return SL_ERROR;
+            }
+            copy_str(n->event, (int)sizeof(n->event), val);
+            return SL_META;
+        }
+        if (strcmp(key, "offline") == 0) {
+            append_line(n->offline, (int)sizeof(n->offline), val);
+            return SL_META;
+        }
+        if (strcmp(key, "once") == 0) {
+            int id = event_id_of(val);
+            if (!id) {
+                snprintf(err, (size_t)err_size,
+                         "@once 要写成 A1 / B3 / G6（字母 A-Z + 1-15），实际是「%s」", val);
+                return SL_ERROR;
+            }
+            n->once_id = id;
+            return SL_META;
+        }
+        if (strcmp(key, "toast") == 0) {
+            if (!val[0]) {
+                snprintf(err, (size_t)err_size, "@toast 后面要写提示文字");
+                return SL_ERROR;
+            }
+            if (strlen(val) >= sizeof(n->toast)) {
+                snprintf(err, (size_t)err_size, "@toast 超过 %d 字节", (int)sizeof(n->toast) - 1);
+                return SL_ERROR;
+            }
+            copy_str(n->toast, (int)sizeof(n->toast), val);
+            return SL_META;
+        }
+
+        snprintf(err, (size_t)err_size,
+                 "未知指令 @%s（只有 bg/char/loc/event/offline/once/toast）", key);
+        return SL_ERROR;
+    }
+
+    /* 台词或旁白 */
+    if (n->line_count >= MAX_LINES) {
+        snprintf(err, (size_t)err_size, "节点里超过 %d 行，多的被丢弃", MAX_LINES);
+        return SL_ERROR;
+    }
+
+    char *bar = strchr(line, '|');
+    Line *ln  = &n->lines[n->line_count];
+    memset(ln, 0, sizeof(*ln));
+
+    const char *speaker = "";
+    const char *text    = line;
+    if (bar) {
+        *bar = '\0';
+        speaker = line;
+        text    = ltrim(bar + 1);
+    }
+    if (strlen(speaker) >= sizeof(ln->speaker)) {
+        snprintf(err, (size_t)err_size, "说话人超过 %d 字节", (int)sizeof(ln->speaker) - 1);
+        return SL_ERROR;
+    }
+    if (strlen(text) >= MAX_TEXT) {
+        snprintf(err, (size_t)err_size, "台词 %d 字节，上限 %d，会被截断",
+                 (int)strlen(text), MAX_TEXT - 1);
+        return SL_ERROR;
+    }
+
+    copy_str(ln->speaker, (int)sizeof(ln->speaker), speaker);
+    copy_str(ln->text, MAX_TEXT, text);
+    n->line_count++;
+    return SL_LINE;
+}
+
 int script_load(Game *g, const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
 
     memset(g, 0, sizeof(*g));
+    g_err_count = 0;
 
-    char   buf[MAX_TEXT + 128];
-    int    cur = -1;          /* 当前正在写入的节点下标 */
-    int    first = 1;
+    char buf[MAX_TEXT + 128];
+    char err[192];
+    int  cur     = -1;          /* 当前正在写入的节点下标 */
+    int  first   = 1;
+    int  line_no = 0;
 
     while (fgets(buf, (int)sizeof(buf), f)) {
-        /* 跳过 UTF-8 BOM */
         char *line = buf;
+        line_no++;
+
+        /* 跳过 UTF-8 BOM */
         if (first) {
             unsigned char *u = (unsigned char *)line;
             if (u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF) line += 3;
@@ -132,127 +456,31 @@ int script_load(Game *g, const char *path)
         }
 
         line = ltrim(line);
-        rtrim(line);
 
-        if (line[0] == '\0' || line[0] == '#') continue;
-
-        /* :: 节点 */
+        /* 节点声明要先开槽位再交给解析器填 id */
         if (line[0] == ':' && line[1] == ':') {
-            if (g->node_count >= MAX_NODES) break;
+            if (g->node_count >= MAX_NODES) {
+                report(line_no, "节点数超过上限，后面的全部丢弃");
+                break;
+            }
             cur = g->node_count++;
             memset(&g->nodes[cur], 0, sizeof(Node));
-            copy_str(g->nodes[cur].id, MAX_ID, ltrim(line + 2));
+            if (script_parse_line(line, &g->nodes[cur], err, (int)sizeof(err)) == SL_ERROR)
+                report(line_no, err);
             continue;
         }
 
         if (cur < 0) continue;   /* 节点声明之前的行忽略 */
 
-        /* => 自动路由：`=> aff>=46 目标节点`，进节点时按好感度跳，不需要玩家点 */
-        if (line[0] == '=' && line[1] == '>') {
-            char *body = ltrim(line + 2);
-            char *sp = body;
-            while (*sp && *sp != ' ' && *sp != '\t') sp++;
-            if (!*sp) continue;
-            *sp = '\0';
-            char *target = ltrim(sp + 1);
-            rtrim(target);
-            if (!target[0]) continue;
-            if (g->nodes[cur].route_count >= MAX_ROUTES) continue;
-
-            Route *r = &g->nodes[cur].routes[g->nodes[cur].route_count++];
-            parse_aff_cond(body, &r->cond_min, &r->cond_max);
-            copy_str(r->target, MAX_ID, target);
-            continue;
-        }
-
-        /* -> 选项：最多六列，后四列可省略 */
-        if (line[0] == '-' && line[1] == '>') {
-            char *body = ltrim(line + 2);
-            if (g->nodes[cur].choice_count >= MAX_CHOICES) continue;
-
-            char *field[6] = { 0 };
-            int   nf = 0;
-            field[nf++] = body;
-
-            char *p = body;
-            while (nf < 6) {
-                char *bar = strchr(p, '|');
-                if (!bar) break;
-                *bar = '\0';
-                p = bar + 1;
-                field[nf++] = p;
-            }
-            if (nf < 2) continue;          /* 至少要有 选项文字|目标 */
-
-            Choice *c = &g->nodes[cur].choices[g->nodes[cur].choice_count++];
-            copy_str(c->text, (int)sizeof(c->text), field[0]);
-            copy_str(c->target, MAX_ID, ltrim(field[1]));
-            if (field[2]) copy_str(c->prompt, (int)sizeof(c->prompt), field[2]);
-            if (field[3]) copy_str(c->scene,  (int)sizeof(c->scene),  field[3]);
-            c->affinity = field[4] ? atoi(ltrim(field[4])) : 1;
-            parse_condition(c, field[5] ? ltrim(field[5]) : NULL);
-
-            rtrim(c->text);
-            rtrim(c->target);
-            rtrim(c->prompt);
-            rtrim(c->scene);
-            continue;
-        }
-
-        /* @bg 背景图名，形如 `@bg lib_window`，同名文件在 data/backgrounds/
-           @char 立绘，形如 `@char shenzhiji:soft`，文件在 data/sprites/ */
-        if (line[0] == '@') {
-            char *body = ltrim(line + 1);
-            if (strncmp(body, "bg", 2) == 0) {
-                body = ltrim(body + 2);
-                copy_str(g->nodes[cur].bg, (int)sizeof(g->nodes[cur].bg), body);
-                rtrim(g->nodes[cur].bg);
-            } else if (strncmp(body, "char", 4) == 0) {
-                body = ltrim(body + 4);
-                copy_str(g->nodes[cur].spr, (int)sizeof(g->nodes[cur].spr), body);
-                rtrim(g->nodes[cur].spr);
-            } else if (strncmp(body, "loc", 3) == 0) {
-                body = ltrim(body + 3);
-                copy_str(g->nodes[cur].loc, (int)sizeof(g->nodes[cur].loc), body);
-                rtrim(g->nodes[cur].loc);
-            } else if (strncmp(body, "event", 5) == 0) {
-                body = ltrim(body + 5);
-                copy_str(g->nodes[cur].event, (int)sizeof(g->nodes[cur].event), body);
-                rtrim(g->nodes[cur].event);
-            } else if (strncmp(body, "offline", 7) == 0) {
-                body = ltrim(body + 7);
-                rtrim(body);
-                append_line(g->nodes[cur].offline, (int)sizeof(g->nodes[cur].offline), body);
-            } else if (strncmp(body, "once", 4) == 0) {
-                body = ltrim(body + 4);
-                g->nodes[cur].once_id = event_id_of(body);
-            } else if (strncmp(body, "toast", 5) == 0) {
-                body = ltrim(body + 5);
-                copy_str(g->nodes[cur].toast, (int)sizeof(g->nodes[cur].toast), body);
-                rtrim(g->nodes[cur].toast);
-            }
-            continue;
-        }
-
-        /* 台词或旁白 */
-        if (g->nodes[cur].line_count >= MAX_LINES) continue;
-
-        char *bar = strchr(line, '|');
-        Line *ln = &g->nodes[cur].lines[g->nodes[cur].line_count++];
-
-        if (bar) {
-            *bar = '\0';
-            copy_str(ln->speaker, (int)sizeof(ln->speaker), line);
-            copy_str(ln->text, MAX_TEXT, ltrim(bar + 1));
-        } else {
-            ln->speaker[0] = '\0';
-            copy_str(ln->text, MAX_TEXT, line);
-        }
+        if (script_parse_line(line, &g->nodes[cur], err, (int)sizeof(err)) == SL_ERROR)
+            report(line_no, err);
     }
 
     fclose(f);
     return g->node_count > 0;
 }
+
+int script_error_count(void) { return g_err_count; }
 
 int script_find(const Game *g, const char *id)
 {
@@ -344,6 +572,15 @@ void game_enter_node(Game *g, const char *id)
 {
     int idx = script_find(g, id);
     if (idx >= 0) game_enter_index(g, idx);
+}
+
+/* 读档专用：铺开节点但不跑路由。存档里记的节点已经是路由之后的落点，
+   再跑一遍会被"当前"好感度带去别的分支（从标题读档时好感度是 0，
+   会一路掉到最低档的保底事件，位置就丢了）。 */
+void game_restore_index(Game *g, int index)
+{
+    if (index < 0 || index >= g->node_count) return;
+    apply_node(g, index);
 }
 
 const Node *game_current_node(const Game *g)

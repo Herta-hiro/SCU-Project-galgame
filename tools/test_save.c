@@ -28,8 +28,10 @@ int main(void)
     g.line_index  = 0;
     g.affinity    = 7;
     g.read_bits[3] = 0x5;
-    g.seen[17] = 1;   /* A1 */
-    g.seen[51] = 1;   /* C3 */
+    /* 用 event_id_of 反查下标，别手算 —— 之前这里写死 17/51 并标成 A1/C3，
+       实际 A1=1、C3=35，注释和数字一起错了。 */
+    g.seen[event_id_of("A1")] = 1;
+    g.seen[event_id_of("C3")] = 1;
 
     check("保存返回成功", save_write(&g, 2) == 1);
     check("存档文件存在", save_exists(2) == 1);
@@ -43,7 +45,8 @@ int main(void)
     check("好感度还原", g.affinity == 7);
     check("已读位图还原", g.read_bits[3] == 0x5);
     check("背景随节点还原", strcmp(g.bg, "bg_lib_window") == 0);
-    check("事件触发标记还原", g.seen[17] == 1 && g.seen[51] == 1);
+    check("事件触发标记还原", g.seen[event_id_of("A1")] == 1 &&
+                              g.seen[event_id_of("C3")] == 1);
 
     /* ---- 槽位信息（供存读档界面显示） ---- */
     SaveSlotInfo si;
@@ -78,6 +81,29 @@ int main(void)
             fclose(f);
         }
         check("magic 损坏后拒绝读取", save_read(&g, 2) == 0);
+    }
+
+    /* ---- 带自动路由的节点：读档不能因为"当前好感度"被重新路由带走 ----
+       hub 有 35 条 => 路由。存档时人在 hub（好感 50），读档时运行时的好感度是 0；
+       如果读档走的是 game_enter_index，就会顺着 aff>=0 掉到保底事件 f1_seat，
+       存档位置直接丢失。 */
+    {
+        static Game h, r;
+        script_load(&h, "data/main.gal");
+        int hub = script_find(&h, "hub");
+        check("hub 节点存在", hub >= 0);
+
+        if (hub >= 0) {
+            h.affinity = 50;
+            game_restore_index(&h, hub);
+            h.line_index = 1;
+            save_write(&h, 2);
+
+            script_load(&r, "data/main.gal");     /* 好感度 0 的全新状态 */
+            check("读档回到 hub 本身", save_read(&r, 2) == 1 && r.node_index == hub);
+            check("读档后好感度还原成 50", r.affinity == 50);
+            check("读档后行号还原成 1", r.line_index == 1);
+        }
     }
 
     printf("\n%s\n", failures == 0 ? "全部通过" : "存在失败项");

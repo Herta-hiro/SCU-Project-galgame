@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 和本地同一套工具链（MSYS2 UCRT64 + raylib），避免 raylib 版本差异
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-raylib
+
+      - name: 编译
+        run: sh build.sh
+
+      # 下面三个测试都不需要开窗口
+      - name: 剧本解析测试
+        run: |
+          gcc -std=c11 -Isrc -O1 -Wall -Wextra \
+              tools/test_script.c src/script.c src/save.c src/util.c -o test_script.exe
+          ./test_script.exe
+
+      - name: 存档测试
+        run: |
+          gcc -std=c11 -Isrc -O1 -Wall -Wextra \
+              tools/test_save.c src/script.c src/save.c src/util.c -o test_save.exe
+          ./test_save.exe
+
+      - name: 引擎语法校验（剧本 DSL）
+        run: ./gal.exe --check
+
+      - name: 引用与可达性校验
+        run: python tools/check_script.py

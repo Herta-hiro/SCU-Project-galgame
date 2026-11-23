@@ -1,4 +1,5 @@
 #include "character.h"
+#include "contract.h"
 
 #include <stdio.h>
 #include <string.h>
