@@ -137,9 +137,14 @@ int save_read(Game *g, int slot)
     /* 先恢复好感度和事件位，再铺开节点。
        用 game_restore_index 而不是 game_enter_index：后者会跑自动路由，
        而存档里记的已经是路由之后的落点，重跑一次会被当前好感度带去别的分支。
-       顺序也有讲究——先设 affinity，apply_node 记下的 event_entry_aff 才是对的。 */
+       顺序也有讲究——先设 affinity，apply_node 记下的 event_entry_aff 才是对的。
+
+       事件位是**覆盖**不是取并集。取并集会把这局后来演过的事件写进旧档，
+       读回 D4 之前时 D4 的"已演"标记还在，hub 的路由命中已演事件就整条停住，
+       玩家只剩「安静坐下」——一条死路。存档本来就该是"那一刻的完整状态"，
+       读档之后那些事件回到未演，路由才能重新触发。 */
     g->affinity = d.affinity;
-    for (int k = 0; k < EVENT_SLOTS; k++) g->seen[k] |= d.seen[k];
+    memcpy(g->seen, d.seen, sizeof(g->seen));
     memcpy(g->read_bits, d.read_bits, sizeof(g->read_bits));
 
     game_restore_index(g, d.node_index);

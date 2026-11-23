@@ -122,6 +122,35 @@ int main(void)
         }
     }
 
+    /* ---- 读档要把"这局后来的进度"丢掉，否则会卡死 ----
+       场景：在 D4 之前存了档，之后演到 D4、再演完 H 段。此时读回那个旧档，
+       如果事件位是取并集，D4 的"已演"标记会保留，hub 第一条路由命中它就直接
+       停住，玩家只剩「安静坐下」——一条死路。
+       注意必须用**同一个 Game**：换一个全新的 Game 复现不出来。 */
+    {
+        static Game one;
+        script_load(&one, "data/main.gal");
+        int hub = script_find(&one, "hub");
+        int d4  = event_id_of("D4");
+
+        one.affinity = 86;
+        one.seen[d4] = 0;                       /* 存的时候还没演 D4 */
+        game_restore_index(&one, hub);
+        save_write(&one, 2);
+
+        /* 这一局接着演到了 D4 */
+        one.seen[d4] = 1;
+
+        check("读档成功（D4 之前）", save_read(&one, 2) == 1);
+        check("读档后 D4 回到未演", one.seen[d4] == 0);
+
+        /* 回到 hub 应该能重新路由进 D4，而不是停住 */
+        one.affinity = 86;
+        game_enter_index(&one, hub);
+        check("读档后能重新进 D4", hub >= 0 &&
+              strcmp(one.nodes[one.node_index].id, "d4_confession") == 0);
+    }
+
     printf("\n%s\n", failures == 0 ? "全部通过" : "存在失败项");
     return failures == 0 ? 0 : 1;
 }
