@@ -13,6 +13,12 @@ void ui_tick(float dt, int fast);
 int  ui_is_done(void);
 void ui_finish(void);
 
+/* 场景切换的整屏淡入：@bg 变化时从黑场拉起，普通节点不闪。
+   每帧调 ui_scene_tick，画面画完后调 ui_draw_scene_fade。 */
+void ui_scene_tick(float dt, const char *bg);
+void ui_scene_finish(void);      /* 立刻结束淡入，截图模式用 */
+void ui_draw_scene_fade(void);
+
 /* 绘制 */
 void ui_draw(const Game *g);
 void ui_draw_choices(const Game *g, int hover_index);

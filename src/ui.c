@@ -47,6 +47,37 @@ static const Color COL_CHOICE_ED = {  74,  92, 110, 255 };
 
 static Font  g_font;
 
+/* 场景切换的整屏淡入。@bg 一变就从黑场拉起，比硬切干净。
+   只跟背景名走：普通节点（不改 @bg）不会闪。 */
+static char  g_scene_bg[32];
+static float g_scene_fade = 1.0f;     /* 0 = 全黑，1 = 正常 */
+
+void ui_scene_tick(float dt, const char *bg)
+{
+    if (!bg) bg = "";
+
+    if (strcmp(bg, g_scene_bg) != 0) {
+        snprintf(g_scene_bg, sizeof(g_scene_bg), "%s", bg);
+        g_scene_fade = 0.0f;
+    }
+
+    if (g_scene_fade < 1.0f) {
+        g_scene_fade += dt / 0.32f;
+        if (g_scene_fade > 1.0f) g_scene_fade = 1.0f;
+    }
+}
+
+void ui_scene_finish(void)
+{
+    g_scene_fade = 1.0f;      /* 截图模式用：别拍到黑场 */
+}
+
+void ui_draw_scene_fade(void)
+{
+    if (g_scene_fade < 1.0f)
+        DrawRectangle(0, 0, SCREEN_W, SCREEN_H, Fade(BLACK, 1.0f - g_scene_fade));
+}
+
 /* 打字机状态 */
 static int   g_total;
 static int   g_visible;

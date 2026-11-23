@@ -12,7 +12,8 @@ fi
 gcc -O2 -Wall -Wextra -std=c11 \
     -Isrc -I"$MSYS_PREFIX/include" \
     src/main.c src/script.c src/save.c src/ui.c src/util.c \
-    src/menu.c src/ai.c src/character.c src/bg.c src/sprite.c src/chinese_font_data.c \
+    src/menu.c src/ai.c src/character.c src/bg.c src/sprite.c src/audio.c \
+    src/chinese_font_data.c \
     -o gal.exe \
     -L"$MSYS_PREFIX/lib" -lraylib -lglfw3 -lopengl32 -lgdi32 -lwinmm -lpthread \
     -static-libgcc

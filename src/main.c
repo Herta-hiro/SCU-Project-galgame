@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "menu.h"
 #include "ai.h"
+#include "audio.h"
 #include "character.h"
 #include "bg.h"
 #include "sprite.h"
@@ -278,6 +279,8 @@ static void handle_choice(Game *g)
     int i = ui_choice_hit(GetMousePosition(), n, g->affinity);
     if (i < 0 || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
 
+    audio_se_click();
+
     if (choice_is_ai(&n->choices[i])) {
         char cid[MAX_ID], rid[MAX_ID];
         choice_split_ai(&n->choices[i], cid, MAX_ID, rid, MAX_ID);
@@ -308,6 +311,8 @@ static int hovered_choice(Game *g)
 static void update_title(void)
 {
     int act = menu_update_title();
+    if (act != TITLE_NONE) audio_se_click();
+
     switch (act) {
         case TITLE_NEW:
             game_restart(&g_game);
@@ -383,15 +388,18 @@ static void update_game(float dt)
     if (IsKeyPressed(KEY_S)) {
         g_prev_state = STATE_GAME;
         g_game.state = STATE_SAVE;
+        audio_se_page();
         return;
     }
     if (IsKeyPressed(KEY_L)) {
         g_prev_state = STATE_GAME;
         g_game.state = STATE_LOAD;
+        audio_se_page();
         return;
     }
     if (IsKeyPressed(KEY_TAB)) {
         g_game.state = STATE_LOG;
+        audio_se_page();
         return;
     }
 
@@ -406,6 +414,7 @@ static void update_game(float dt)
                       IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER);
 
     if (advance_key) {
+        audio_se_click();
         if (!ui_is_done()) ui_finish();
         else               advance_game(&g_game);
     }
@@ -606,6 +615,7 @@ int main(int argc, char **argv)
     ui_init();
     bg_init();
     sprite_init();
+    audio_init();
     ai_init();
 
     /* 预热：启动时先加载一次常用纹理，避免第一帧绘制时纹理还没上传到 GPU */
@@ -746,6 +756,7 @@ int main(int argc, char **argv)
         }
 
         ui_finish();
+        ui_scene_finish();          /* 别把黑场拍进截图 */
         for (int i = 0; i < 2; i++) {
             BeginDrawing();
             fix_hidpi_viewport();
@@ -765,6 +776,7 @@ int main(int argc, char **argv)
         TakeScreenshot("shot.png");
         printf("screenshot -> shot.png  (state=%d)\n", g_game.state);
         ai_shutdown();
+        audio_shutdown();
         sprite_shutdown();
         bg_shutdown();
         ui_shutdown();
@@ -797,6 +809,9 @@ int main(int argc, char **argv)
                    (g_fast_force ||
                     IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
         ui_tick(dt, fast);
+
+        audio_update();
+        ui_scene_tick(dt, g_game.bg);
 
         /* 进新节点就冒一句提示（@toast）：安静坐下这种循环点一次有反馈 */
         {
@@ -841,11 +856,13 @@ int main(int argc, char **argv)
 
         if (g_ai_pending) draw_ai_pending();
         draw_toast(dt);
+        ui_draw_scene_fade();       /* 场景切换的整屏淡入，盖在所有东西上面 */
 
         EndDrawing();
     }
 
     ai_shutdown();
+    audio_shutdown();
     sprite_shutdown();
     bg_shutdown();
     ui_shutdown();
