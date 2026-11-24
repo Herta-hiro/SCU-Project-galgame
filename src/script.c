@@ -56,15 +56,18 @@ static void copy_str(char *dst, int size, const char *src)
 
 /* 好感条件解析。支持 aff>=46 / aff>45 / aff<=20 / aff<21 / aff==0，
    也接受只写 >=46。语法层面的错由调用方先行拦截。 */
-static void parse_aff_cond(const char *s, int *pmin, int *pmax)
+static void parse_cond(const char *s, int *pmin, int *pmax, int *pmeter)
 {
     *pmin = 0;
     *pmax = 100;
+    *pmeter = METER_AFF;
     if (!s || !*s) return;
 
     const char *p = s;
     while (*p == ' ') p++;
-    if (strncmp(p, "aff", 3) == 0) p += 3;
+    if (strncmp(p, "bond", 4) == 0) { *pmeter = METER_BOND; p += 4; }
+    else if (strncmp(p, "b", 1) == 0)  { *pmeter = METER_BOND; p += 1; }
+    else if (strncmp(p, "aff", 3) == 0) p += 3;
     while (*p == ' ') p++;
 
     char op[3] = { 0 };
@@ -87,12 +90,54 @@ static void parse_aff_cond(const char *s, int *pmin, int *pmax)
     if (*pmax > 100) *pmax = 100;
 }
 
-int choice_visible(const Choice *c, int affinity)
+/* 事件数条件：从第六列里抠出 `ev>=8`。
+ *
+ * 和好感条件分开解析，是因为两者要能**同时出现**：`aff<86 & ev>=8`
+ * 表示「好感还没到表白线，而且已经演过至少 8 个事件」。
+ * parse_cond 遇到 "ev" 开头会原样跳过（认不出 aff/bond 就保持 0~100），
+ * 这里补上 ev 那一段。
+ *
+ * 只认 >= 和 >，其它写法忽略（默认 0 = 不限制）。
+ */
+static void parse_cond_ev(const char *s, int *pev)
+{
+    *pev = 0;
+    if (!s || !*s) return;
+
+    const char *p = strstr(s, "ev");
+    if (!p) return;
+    p += 2;
+    while (*p == ' ') p++;
+
+    char op[3] = { 0 };
+    int  n = 0;
+    while (*p && (*p == '>' || *p == '<' || *p == '=') && n < 2) op[n++] = *p++;
+    while (*p == ' ') p++;
+
+    int v = 0;
+    if (sscanf(p, "%d", &v) != 1) return;
+
+    if      (strcmp(op, ">=") == 0) *pev = v;
+    else if (strcmp(op, ">")  == 0) *pev = v + 1;
+    else if (strcmp(op, "==") == 0 || strcmp(op, "=") == 0) *pev = v;
+    if (*pev < 0) *pev = 0;
+}
+
+int choice_visible(const Choice *c, int affinity, int seen_events)
 {
     if (!c) return 0;
     if (affinity < c->cond_min) return 0;
     if (affinity > c->cond_max) return 0;
+    if (seen_events < c->cond_events) return 0;
     return 1;
+}
+
+int game_seen_count(const Game *g)
+{
+    int n = 0;
+    for (int i = 0; i < EVENT_SLOTS; i++)
+        if (g->seen[i]) n++;
+    return n;
 }
 
 /* 事件编号：A1=1、B1=17、G6=102……字母下标（A 从 0 起）× 16 + 1~15 的数字。
@@ -219,7 +264,13 @@ static ScriptLineKind parse_choice(char *body, Node *n, char *err, int err_size)
         }
         copy_str(c->scene, (int)sizeof(c->scene), s);
     }
-    parse_aff_cond(nf >= 6 ? ltrim(f[5]) : NULL, &c->cond_min, &c->cond_max);
+    {   /* 选项的显示条件：好感/距离显隐之外，还认 ev>=N（已演事件数）。
+           两者可以写在一起：aff<86 & ev>=8 */
+        int meter = METER_AFF;
+        const char *cond = (nf >= 6) ? ltrim(f[5]) : NULL;
+        parse_cond(cond, &c->cond_min, &c->cond_max, &meter);
+        parse_cond_ev(cond, &c->cond_events);
+    }
 
     n->choice_count++;
     return SL_CHOICE;
@@ -292,7 +343,7 @@ ScriptLineKind script_parse_line(const char *raw, Node *n, char *err, int err_si
         }
 
         Route *r = &n->routes[n->route_count++];
-        parse_aff_cond(body, &r->cond_min, &r->cond_max);
+        parse_cond(body, &r->cond_min, &r->cond_max, &r->meter);
         copy_str(r->target, MAX_ID, target);
         return SL_ROUTE;
     }
@@ -391,9 +442,16 @@ ScriptLineKind script_parse_line(const char *raw, Node *n, char *err, int err_si
             copy_str(n->toast, (int)sizeof(n->toast), val);
             return SL_META;
         }
+        if (strcmp(key, "meter") == 0) {
+            /* @meter bond：这个节点的选项数值记到“距离”上，而不是好感 */
+            if (strcmp(val, "bond") == 0)      { n->meter = METER_BOND; return SL_META; }
+            if (strcmp(val, "aff") == 0 || !val[0]) { n->meter = METER_AFF; return SL_META; }
+            snprintf(err, (size_t)err_size, "@meter 只认 bond / aff，实际是「%s」", val);
+            return SL_ERROR;
+        }
 
         snprintf(err, (size_t)err_size,
-                 "未知指令 @%s（只有 bg/char/loc/event/offline/once/toast）", key);
+                 "未知指令 @%s（只有 bg/char/loc/event/offline/once/toast/meter）", key);
         return SL_ERROR;
     }
 
@@ -530,8 +588,6 @@ static void apply_node(Game *g, int index)
     /* 每次进节点都 +1：main 靠它判断“又进了一次同一个节点”，好重放 @toast */
     g->enter_seq++;
 
-    /* 记下进这一场时的好感度，给“越界扣分但不倒退”兜底 */
-    g->event_entry_aff = g->affinity;
 }
 
 void game_enter_index(Game *g, int index)
@@ -547,17 +603,19 @@ void game_enter_index(Game *g, int index)
 
         for (int i = 0; i < n->route_count; i++) {
             const Route *r = &n->routes[i];
-            if (g->affinity < r->cond_min || g->affinity > r->cond_max) continue;
+            int value = (r->meter == METER_BOND) ? g->bond : g->affinity;
+            if (value < r->cond_min || value > r->cond_max) continue;
 
             int t = script_find(g, r->target);
             if (t < 0) continue;
 
-            /* 演过一次的事件不再进：本档事件演过就停在 hub，不往低档退回 */
+            /* 演过一次的事件不再进：跳过它，继续往下找。
+               以前这里是 break（直接停在 hub），但那样会漏掉「好感 86
+               且 D4 已演」的情况——玩家读档回到 hub 时啥也演不了，
+               又没有出口，只能反复点「安静坐下」。改成 continue 之后，
+               已演的都跳过，剩下的按好感从高到低接着来。 */
             int once = g->nodes[t].once_id;
-            if (once > 0 && g->seen[once]) {
-                next = -1;
-                break;
-            }
+            if (once > 0 && g->seen[once]) continue;
 
             next = t;
             break;               /* 从上往下取第一条命中的 */
@@ -610,8 +668,9 @@ int game_advance(Game *g)
     }
 
     int visible = 0;
+    int seen_ev = game_seen_count(g);
     for (int i = 0; i < n->choice_count; i++)
-        if (choice_visible(&n->choices[i], g->affinity)) visible++;
+        if (choice_visible(&n->choices[i], g->affinity, seen_ev)) visible++;
 
     if (visible > 0) {
         g->waiting_choice = 1;
@@ -628,6 +687,7 @@ void game_restart(Game *g)
     g->node_index     = 0;
     g->line_index     = 0;
     g->affinity       = 0;
+    g->bond           = 0;
     g->waiting_choice = 0;
     g->finished       = 0;
     g->ai_active      = 0;
@@ -639,7 +699,6 @@ void game_restart(Game *g)
     g->location[0]    = '\0';
     g->last_event[0]  = '\0';
     g->event_history[0] = '\0';
-    g->event_entry_aff = 0;
     memset(g->seen, 0, sizeof(g->seen));
     memset(g->read_bits, 0, sizeof(g->read_bits));
 
@@ -651,7 +710,10 @@ void game_restart(Game *g)
 
 int choice_is_ai(const Choice *c)
 {
-    return c && c->target[0] == '@';
+    if (!c || c->target[0] != '@') return 0;
+    /* "@input" 不是 AI 支线，是「自己说一句」的输入入口，由 main.c 单独处理 */
+    if (strcmp(c->target, "@input") == 0) return 0;
+    return 1;
 }
 
 /* 把 "@linxia:after_talk" 拆成角色 id 和返回节点 id。
@@ -701,10 +763,14 @@ static int parse_judgement(const char *s, int *found)
     p = strstr(s, "判定：");
     if (p) {
         p += 9;                       /* 「判定：」= 2 汉字 + 全角冒号 */
-    } else {
-        p = strstr(s, "判定:");
-        if (!p) return 0;
+    } else if ((p = strstr(s, "判定:")) != NULL) {
         p += 7;                       /* 「判定:」= 2 汉字 + 半角冒号 */
+    } else if ((p = strstr(s, "【")) != NULL) {
+        /* 模型偶尔写成「【+1】」这种简写，跳过【直接取数字；
+           如果【后面不是数字（比如旧格式的「【好感：…」），下面的范围检查会挡掉。 */
+        p += 3;
+    } else {
+        return 0;
     }
 
     while (*p == ' ' || *p == '\t') p++;

@@ -43,6 +43,7 @@ int main(void)
     g.node_index  = 3;
     g.line_index  = 0;
     g.affinity    = 7;
+    g.bond        = 37;
     g.read_bits[3] = 0x5;
     /* 用 event_id_of 反查下标，别手算 —— 之前这里写死 17/51 并标成 A1/C3，
        实际 A1=1、C3=35，注释和数字一起错了。 */
@@ -59,6 +60,7 @@ int main(void)
     check("节点指针还原", g.node_index == 3);
     check("行指针还原", g.line_index == 0);
     check("好感度还原", g.affinity == 7);
+    check("距离值还原", g.bond == 37);
     check("已读位图还原", g.read_bits[3] == 0x5);
     check("背景随节点还原", strcmp(g.bg, "bg_lib_window") == 0);
     check("事件触发标记还原", g.seen[event_id_of("A1")] == 1 &&

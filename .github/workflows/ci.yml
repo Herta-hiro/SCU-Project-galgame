@@ -45,5 +45,9 @@ jobs:
       - name: 引擎语法校验（剧本 DSL）
         run: ./gal.exe --check
 
+      - name: 配音覆盖检查
+        # 改了台词/加了节点却没重新生成配音，这里会红
+        run: ./gal.exe --voice-check
+
       - name: 引用与可达性校验
         run: python tools/check_script.py

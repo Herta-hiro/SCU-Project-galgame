@@ -26,8 +26,10 @@
 #define AI_BODY_SIZE    64000
 
 /* 提示词模板的版本号。改了下面的模板就要 +1，否则同一分支还会命中旧缓存，
-   让人以为"改了没生效"。 */
-#define PROMPT_VERSION  2
+   让人以为"改了没生效"。
+   3: 事件库按好感裁剪、max_tokens、输出收窄到 2-4 行
+   4: 状态栏简化成「【判定：+2】」，输出 2-3 行 */
+#define PROMPT_VERSION  7
 
 /* 角色卡没写 offlineN 时的最后兜底。故意不带人名，
    只做“她没抬头、馆里很安静”这类中性动作，任何角色都能用。 */
@@ -38,10 +40,12 @@ static const char *OFFLINE_FALLBACK =
 
 static char g_key[160];
 static char g_model[64] = "deepseek-chat";
+static int  g_offline;      /* 1 = 有 key 也强制走离线台词，见 ai.h 的说明 */
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int      g_state = AI_IDLE;
 static char     g_reply[AI_REPLY_MAX];
+static char     g_partial[AI_REPLY_MAX];   /* 流式过程中已收到的部分 */
 static char     g_error[160];
 static int      g_source;          /* 0=真实生成 1=缓存 2=离线兜底 */
 static pthread_t g_thread;
@@ -52,6 +56,10 @@ static AiPrompt g_job;
 
 static void load_config(void)
 {
+    /* 环境变量 GAL_OFFLINE=1 也能强制离线，方便一次性的演示/录屏 */
+    const char *off = getenv("GAL_OFFLINE");
+    if (off && (off[0] == '1' || off[0] == 'y' || off[0] == 'Y')) g_offline = 1;
+
     const char *env = getenv("DEEPSEEK_API_KEY");
     if (env && *env) {
         snprintf(g_key, sizeof(g_key), "%s", env);
@@ -62,12 +70,23 @@ static void load_config(void)
     if (!f) return;
 
     char line[320];
+    int  first = 1;
     while (fgets(line, sizeof(line), f)) {
-        char *eq = strchr(line, '=');
+        /* 跳过 UTF-8 BOM：记事本、PowerShell 的 Out-File、不少编辑器都会在开头写 EF BB BF，
+           不跳的话第一行会变成 "\xEF\xBB\xBFkey"，strcmp(k,"key") 永远不相等——
+           表现就是「明明填了 key，游戏里却一直走离线」，而且看不出来为什么。 */
+        char *row = line;
+        if (first) {
+            first = 0;
+            unsigned char *u = (unsigned char *)row;
+            if (u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF) row += 3;
+        }
+
+        char *eq = strchr(row, '=');
         if (!eq) continue;
         *eq = '\0';
 
-        char *k = line;
+        char *k = row;
         char *v = eq + 1;
         while (*k == ' ' || *k == '\t') k++;
         while (*v == ' ' || *v == '\t') v++;
@@ -75,8 +94,9 @@ static void load_config(void)
         char *end = v + strlen(v);
         while (end > v && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ')) *--end = '\0';
 
-        if (strcmp(k, "key") == 0)        snprintf(g_key, sizeof(g_key), "%s", v);
-        else if (strcmp(k, "model") == 0) snprintf(g_model, sizeof(g_model), "%s", v);
+        if (strcmp(k, "key") == 0)          snprintf(g_key, sizeof(g_key), "%s", v);
+        else if (strcmp(k, "model") == 0)   snprintf(g_model, sizeof(g_model), "%s", v);
+        else if (strcmp(k, "offline") == 0) g_offline = (v[0] == '1' || v[0] == 'y' || v[0] == 'Y');
     }
     fclose(f);
 }
@@ -98,9 +118,26 @@ void ai_shutdown(void)
 }
 
 int  ai_is_configured(void) { return g_key[0] != '\0'; }
+int  ai_is_offline(void)    { return g_offline || g_key[0] == '\0'; }
+void ai_set_offline(int on) { g_offline = on ? 1 : 0; }
 int  ai_state(void)         { return g_state; }
 int  ai_from_cache(void)    { return g_source; }
 const char *ai_reply(void)  { return g_reply; }
+
+int ai_partial_copy(char *out, int size)
+{
+    if (!out || size <= 1) return 0;
+    out[0] = '\0';
+
+    pthread_mutex_lock(&g_lock);
+    int n = (int)strlen(g_partial);
+    if (n >= size) n = size - 1;
+    if (n > 0) memcpy(out, g_partial, (size_t)n);
+    out[n] = '\0';
+    pthread_mutex_unlock(&g_lock);
+
+    return n;
+}
 
 const char *ai_error(void)
 {
@@ -111,6 +148,118 @@ void ai_set_config(const char *api_key, const char *model)
 {
     if (api_key) snprintf(g_key, sizeof(g_key), "%s", api_key);
     if (model)   snprintf(g_model, sizeof(g_model), "%s", model);
+}
+
+const char *ai_get_key(void) { return g_key; }
+
+void ai_save_config(const char *api_key, const char *model)
+{
+    if (api_key) snprintf(g_key, sizeof(g_key), "%s", api_key);
+    if (model)   snprintf(g_model, sizeof(g_model), "%s", model);
+
+    FILE *f = fopen("data/ai.conf", "w");
+    if (!f) return;
+    fprintf(f, "# 由游戏内「API Key 设置」写入，改完不用重新编译。\n");
+    fprintf(f, "# 不填 key 也能玩：走角色卡离线台词，流程完整，不会报错。\n");
+    fprintf(f, "key=%s\n", g_key);
+    fprintf(f, "model=%s\n", g_model);
+    fprintf(f, "offline=%d\n", g_offline);
+    fclose(f);
+}
+
+/* ---------------- 事件库裁剪 ---------------- */
+
+/* 从 "好感5-15" / "好感≥46" / "好感0" 里抠出区间。
+   抠不出来（H 段写「第N天」）返回 0。 */
+static int parse_aff_range(const char *line, int *lo, int *hi)
+{
+    const char *p = strstr(line, "好感");
+    if (!p) return 0;
+    p += 6;                                   /* "好感" 是 6 字节 */
+
+    while (*p == ' ') p++;
+
+    int ge = 0;
+    if (strncmp(p, "≥", 3) == 0) { p += 3; ge = 1; }
+    else if (*p == '>') { p++; if (*p == '=') p++; ge = 1; }
+
+    if (*p < '0' || *p > '9') return 0;
+
+    int a = atoi(p);
+    while (*p >= '0' && *p <= '9') p++;
+
+    /* 区间写法 "5-15" */
+    if (*p == '-' || *p == '~') {
+        p++;
+        if (*p >= '0' && *p <= '9') {
+            *lo = a;
+            *hi = atoi(p);
+            if (*hi < *lo) return 0;
+            return 1;
+        }
+    }
+
+    *lo = a;
+    *hi = ge ? 100 : a;
+    return 1;
+}
+
+/* 这一条是不是 H 段（D4 表白线之后，写的是「D4之后第1天」而不是好感区间）。
+ *
+ * 注意 character.c 解析角色卡时已经把行首的 "events " 去掉了，
+ * 所以每行实际是「A1 连续同坐第三天｜好感5-15：……」或「H1 立起来的书｜D4之后第1天：……」。
+ * 按事件编号的首字母判断，不能只搜「第」——「连续同坐第三天」里也有「第」。
+ */
+static int is_h_event(const char *line)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    return p[0] == 'H' && p[1] >= '1' && p[1] <= '9';
+}
+
+int ai_trim_events(const char *events, int aff, int stage, char *out, int out_size)
+{
+    if (!out || out_size <= 0) return 0;
+    out[0] = '\0';
+    if (!events || !*events) return 0;
+
+    const int lo_need = aff - 4;      /* 刚演过的一两条，模型可能还要引用 */
+    const int hi_need = aff + 12;     /* 马上会遇到的，给它一个方向 */
+
+    int used = 0;
+    const char *p = events;
+
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        int len = nl ? (int)(nl - p) : (int)strlen(p);
+
+        int keep = 0;
+        int lo = 0, hi = 0;
+
+        if (parse_aff_range(p, &lo, &hi)) {
+            /* 区间和 [lo_need, hi_need] 有交集就留 */
+            if (lo <= hi_need && hi >= lo_need) keep = 1;
+        } else if (is_h_event(p)) {
+            /* H1–H9：只在表白线之后有用 */
+            if (stage >= 4) keep = 1;
+        } else {
+            /* 认不出格式的条目一律保留，宁可多传也别把规则丢掉 */
+            keep = 1;
+        }
+
+        if (keep && len > 0) {
+            if (used + len + 2 >= out_size) break;
+            memcpy(out + used, p, (size_t)len);
+            used += len;
+            out[used++] = '\n';
+            out[used] = '\0';
+        }
+
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    return used;
 }
 
 /* ---------------- JSON ---------------- */
@@ -139,53 +288,58 @@ static void json_escape(const char *s, char *out, int size)
 
 int ai_build_request_json(const AiPrompt *p, char *out, int out_size)
 {
+    /* 事件库按当前好感裁一遍：46 条 11KB 全传，模型每轮都要重新读一遍，
+       首字延迟和费用都翻几倍，而里面九成条目这一档根本不会触发。 */
+    static char events_trimmed[AI_EVENTS_MAX];
+    ai_trim_events(p->events, p->affection, p->stage_index,
+                   events_trimmed, (int)sizeof(events_trimmed));
+
     /* 提示词模板：人设 + 状态 + 事件库 + 续写指令 + 输出格式。
        字段全部来自角色卡和剧本，改内容不用动代码。 */
     char system_plain[AI_SYSTEM_PLAIN];
     snprintf(system_plain, sizeof(system_plain),
              "你扮演视觉小说女主「%s」。\n"
              "%s\n\n"
-             "当前好感度：%d / 100\n"
-             "当前阶段：%s\n"
-             "当前地点：%s\n"
-             "最近事件：%s\n"
-             "已经发生的事：%s\n"
-             "当前场景：%s\n"
-             "已知信息：%s\n"
-             "玩家称呼你：%s\n"
-             "你称呼玩家：%s\n\n"
-             "行为规则：\n%s\n\n"
-             "当前阶段语气：%s\n\n"
-             "事件库（只按这些事件的触发条件与结算判定，不许自创事件）：\n%s\n\n"
-             "本轮续写指令：\n"
-             "1. 先判定玩家行为类型：守规矩 / 越界 / 中性 / 小帮忙 / 资料相关 / 暧昧试探 / 表白。\n"
-             "2. 对照阶段门槛和事件库，判定好感增减（只按规则表，不凭感觉）。\n"
-             "3. 用「动作/神态 + 1-2 句台词」写%s的反应；阶段 2 之后可到 3 句。\n"
-             "4. 若行为触发阶段晋升条件，写一个她态度微变的细节（多看你一眼、多说半句、把杯子挪近半寸），但不点破。\n"
-             "5. 不替玩家行动，不输出选项，不写心理独白。\n"
-             "6. 每行严格写成「%s：内容」或「旁白：内容」；一共 3 到 5 行。\n\n"
-             "输出必须长这样，最后一行是状态栏，不能省：\n"
-             "%s：……嗯。\n"
-             "旁白：她把书往自己那边收了收。\n"
-             "【好感：22/100｜阶段：1｜记忆：他提了借阅单｜判定：+1，守规矩】\n\n"
-             "状态栏由引擎读走、对玩家隐藏，不会出现在剧情里；「判定」只写一个带正负号的整数"
-             "（+2、-3），引擎按它结算好感。缺了这一行，这次回答就算没写完。",
+             "【状态】好感 %d/100｜阶段 %s｜地点 %s｜最近事件 %s\n"
+             "【来龙去脉】%s\n"
+             "【本场场景】%s\n"
+             "【已知信息】%s\n"
+             "【称呼】她叫你「%s」，你叫她「%s」\n\n"
+             "【规则】\n%s\n\n"
+             "【当前阶段语气】%s\n\n"
+             "【事件库·按触发条件与结算判定，不许自创事件】\n%s\n\n"
+             "【对不上事件库的时候】玩家随口说的话往往不落在上面任何一条里，"
+             "这时按这个基准判，别凭感觉：\n"
+             "  +1  具体的帮忙或关心，而且没越界（记得她说过的事、顺手做了件实事）\n"
+             "   0  普通搭话、客套、没有信息量的寒暄\n"
+             "  -1  冒犯、越界、打探隐私、把她当谈资\n"
+             "  同一个人反复说同类的话，第二次起要减到 0——她不重复领情。\n\n"
+             "【怎么写】\n"
+             "1. 一行只放一种东西：台词行只写她说出口的话（不加引号不加动作），动作神态另起一行「旁白：」。\n"
+             "2. 一共 2 到 3 行，越短越好；阶段 2 之后最多 3 句台词。\n"
+             "3. 心里对照上面的「结算」定好感增减，只把结果写进最后一行判定，正文不写数字不写理由。\n"
+             "4. 不替玩家行动，不输出选项，不写心理独白。\n\n"
+             "【输出示例】\n"
+             "%s：……你查了哪本。\n"
+             "旁白：她笔停了一下，抬眼看过来。\n"
+             "【判定：+2】\n\n"
+             "最后一行必须只有判定，格式固定「【判定：+2】」，不写别的字段（好感/阶段/记忆引擎自己都有）。\n"
+             "判定只写带正负号的整数（+1 / -3 / 0），通常 ±1~3，对照事件库「结算」来定，不凭感觉。"
+             "缺这一行这次回答就算没写完。",
              p->character_name[0] ? p->character_name : "她",
              p->persona,
              p->affection,
              p->stage,
              p->location[0] ? p->location : "省图三楼靠窗",
-             p->last_event[0] ? p->last_event : "（无，接着当前场景）",
+             p->last_event[0] ? p->last_event : "（无）",
              p->history[0] ? p->history : "（还没有共同经历）",
              p->scene,
-             p->memory[0] ? p->memory : "（刚认识，还没有共同经历）",
+             p->memory[0] ? p->memory : "（刚认识）",
              p->player_call[0] ? p->player_call : "你",
              p->her_call[0] ? p->her_call : "你",
              p->rules,
              p->stage_tone,
-             p->events,
-             p->character_name[0] ? p->character_name : "她",
-             p->character_name[0] ? p->character_name : "她",
+             events_trimmed,
              p->character_name[0] ? p->character_name : "她");
 
     char sys_esc[AI_SYSTEM_ESC];
@@ -193,8 +347,11 @@ int ai_build_request_json(const AiPrompt *p, char *out, int out_size)
     json_escape(system_plain, sys_esc, (int)sizeof(sys_esc));
     json_escape(p->user_input, user_esc, (int)sizeof(user_esc));
 
+    /* temperature 0.9：1.0 时她偶尔会把同一条规则绕两遍，首字一样慢但要多想。
+       max_tokens 420：2~4 行台词加状态栏撑不满，设上限能让服务端早点收尾。
+       presence/frequency 惩罚压低：角色台词本来就短，重复惩罚反而是噪音。 */
     return snprintf(out, (size_t)out_size,
-        "{\"model\":\"%s\",\"stream\":true,\"temperature\":1.0,"
+        "{\"model\":\"%s\",\"stream\":true,\"temperature\":0.85,\"max_tokens\":420,"
         "\"messages\":[{\"role\":\"system\",\"content\":\"%s\"},"
         "{\"role\":\"user\",\"content\":\"%s\"}]}",
         g_model, sys_esc, user_esc);
@@ -305,6 +462,13 @@ static void cache_path(const AiPrompt *p, char *out, int size)
 
 /* ---------------- 请求 ---------------- */
 
+/* 网络超时。以前是 90 秒——网卡一下就是一分半钟定在「生成中」，
+   玩家只会以为游戏死了。20 秒足够（实测一轮 1 秒），超了就按失败处理。
+   主循环那边还有一层客户端超时兜底，见 g_ai_wait。 */
+#define AI_CURL_TIMEOUT 20
+#define AI_STR_(x) #x
+#define AI_STR(x)  AI_STR_(x)
+
 static void do_request(void)
 {
     char body[AI_BODY_SIZE];
@@ -323,7 +487,7 @@ static void do_request(void)
 
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "curl -s -N --max-time 90 -X POST \"%s\" "
+        "curl -s -N --max-time " AI_STR(AI_CURL_TIMEOUT) " -X POST \"%s\" "
         "-H \"Content-Type: application/json\" "
         "-H \"Authorization: Bearer %s\" "
         "-d @%s/_req.json 2>nul",
@@ -348,8 +512,16 @@ static void do_request(void)
         int n = ai_parse_sse_line(line, delta, (int)sizeof(delta));
         if (n > 0) {
             size_t used = strlen(reply);
-            if (used + (size_t)n < sizeof(reply) - 1)
+            if (used + (size_t)n < sizeof(reply) - 1) {
                 strcat(reply, delta);
+
+                /* 每收到一段就更新一份快照，UI 那边逐帧拷过去显示。
+                   加锁是因为主线程随时可能来读；临界区只有一次 strcpy，
+                   比等整段生成完再显示快得多。 */
+                pthread_mutex_lock(&g_lock);
+                snprintf(g_partial, sizeof(g_partial), "%s", reply);
+                pthread_mutex_unlock(&g_lock);
+            }
         } else if (n == 0 && strstr(line, "\"error\"")) {
             got_error = 1;
             char *m = strstr(line, "\"message\"");
@@ -365,13 +537,16 @@ static void do_request(void)
         g_source = 0;
         g_state  = AI_DONE;
 
-        /* 成功的生成结果写缓存，下次同一输入直接复用 */
-        char path[160];
-        cache_path(&g_job, path, (int)sizeof(path));
-        FILE *cf = fopen(path, "wb");
-        if (cf) {
-            fwrite(g_reply, 1, strlen(g_reply), cf);
-            fclose(cf);
+        /* 成功的生成结果写缓存，下次同一输入直接复用。
+           自由输入不写——每句话都该是新的，写进去只会污染缓存。 */
+        if (!g_job.no_cache) {
+            char path[160];
+            cache_path(&g_job, path, (int)sizeof(path));
+            FILE *cf = fopen(path, "wb");
+            if (cf) {
+                fwrite(g_reply, 1, strlen(g_reply), cf);
+                fclose(cf);
+            }
         }
     } else {
         if (!g_error[0])
@@ -400,28 +575,32 @@ int ai_request(const AiPrompt *p)
 
     memcpy(&g_job, p, sizeof(AiPrompt));
     g_reply[0] = '\0';
+    g_partial[0] = '\0';
     g_error[0] = '\0';
     g_source   = 0;
 
-    /* 1. 先查缓存：同一份 prompt 生成过就直接复用 */
+    /* 1. 先查缓存：同一份 prompt 生成过就直接复用。
+          自由输入（no_cache）跳过这一步——否则同一句话永远得到同样的回答。 */
     char path[160];
-    cache_path(p, path, (int)sizeof(path));
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        size_t n = fread(g_reply, 1, sizeof(g_reply) - 1, f);
-        fclose(f);
-        if (n > 0) {
-            g_reply[n] = '\0';
-            g_source = 1;
-            g_state  = AI_DONE;
-            pthread_mutex_unlock(&g_lock);
-            return 1;
+    if (!p->no_cache) {
+        cache_path(p, path, (int)sizeof(path));
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            size_t n = fread(g_reply, 1, sizeof(g_reply) - 1, f);
+            fclose(f);
+            if (n > 0) {
+                g_reply[n] = '\0';
+                g_source = 1;
+                g_state  = AI_DONE;
+                pthread_mutex_unlock(&g_lock);
+                return 1;
+            }
         }
     }
 
-    /* 2. 没配置 key：走离线兜底，流程照样能演示。
+    /* 2. 没 key，或者有 key 但开关拨到了离线：走离线兜底，流程照样能演示。
           优先用角色卡里按阶段写好的 offlineN 台词。 */
-    if (!g_key[0]) {
+    if (g_offline || !g_key[0]) {
         snprintf(g_reply, sizeof(g_reply), "%s",
                  p->offline[0] ? p->offline : OFFLINE_FALLBACK);
         g_source = 2;
@@ -455,4 +634,16 @@ void ai_poll(void)
         pthread_join(g_thread, NULL);
         g_thread_running = 0;
     }
+}
+
+void ai_abandon(void)
+{
+    /* 主循环已经决定不等了：清掉流式残留，界面立刻恢复正常。
+       后台线程继续跑到自己的 20 秒超时为止，结果会被丢弃——
+       因为调用方把 g_ai_pending 清零了，不会再取。
+       在此期间发起新请求会被 ai_request 拒掉（state 还是 BUSY），
+       调用方会提示「稍等」，不会出现两个线程同时写结果。 */
+    pthread_mutex_lock(&g_lock);
+    g_partial[0] = '\0';
+    pthread_mutex_unlock(&g_lock);
 }

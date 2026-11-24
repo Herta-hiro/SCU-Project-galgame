@@ -4,7 +4,7 @@
 
 用法：
     python tools/import_sprite.py 原图.png --as shenzhiji_normal
-    python tools/import_sprite.py 原图.png --as codel_03 --crop 0.58 --height 1600
+    python tools/import_sprite.py 原图.png --as shenzhiji_normal --crop 0.58 --height 1600
 
 参数：
     --as      输出名（不带扩展名），生成 data/sprites/<名字>.png

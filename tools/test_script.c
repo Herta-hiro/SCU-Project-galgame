@@ -69,6 +69,30 @@ int main(void)
     check("无条件时全显示",         parse1("-> 好|b|说|2").choices[0].cond_min == 0 &&
                                    parse1("-> 好|b|说|2").choices[0].cond_max == 100);
 
+    /* ---- 选项：ev>=N（已演事件数）。
+       hub 里「学期最后一天」这类收尾出口必须靠它挡住，否则玩家一进第二章
+       就能点它直接跳结局——历史上就是这么「一下就学期末」的。 ---- */
+    check("ev>=6 解析成 6",        parse1("-> 好|hub||0||ev>=6").choices[0].cond_events == 6);
+    check("ev>6 解析成 7",         parse1("-> 好|hub||0||ev>6").choices[0].cond_events == 7);
+    check("没有 ev 时是 0",         parse1("-> 好|hub||0||aff<86").choices[0].cond_events == 0);
+    check("ev 不污染好感条件",      parse1("-> 好|hub||0||ev>=6").choices[0].cond_min == 0 &&
+                                   parse1("-> 好|hub||0||ev>=6").choices[0].cond_max == 100);
+    check("好感与 ev 能同时写",
+          parse1("-> 好|hub||0||aff<86 & ev>=6").choices[0].cond_max == 85 &&
+          parse1("-> 好|hub||0||aff<86 & ev>=6").choices[0].cond_events == 6);
+    {
+        const Choice *c = &parse1("-> 好|hub||0||ev>=6").choices[0];
+        check("ev 条件：不够数不显示",  choice_visible(c, 100, 5) == 0);
+        check("ev 条件：刚好到数显示",  choice_visible(c, 100, 6) == 1);
+        check("ev 条件：超过也显示",    choice_visible(c, 100, 20) == 1);
+        check("ev 条件：好感拉满也不绕过", choice_visible(c, 100, 0) == 0);
+    }
+
+    /* ---- 自由输入入口：@input 不是 AI 支线，是 main.c 单独处理的输入界面 ---- */
+    check("@input 不算 AI 分支",    choice_is_ai(&parse1("-> （自己说一句）|@input").choices[0]) == 0);
+    check("普通 AI 分支仍算",       choice_is_ai(&parse1("-> 好|@shenzhiji:hub").choices[0]) == 1);
+    check("@input 解析成合法选项",   parse_kind("-> （自己说一句）|@input") == SL_CHOICE);
+
     /* ---- 选项：该报错的都要报错，不能静默 ---- */
     check("缺目标报错",            parse_kind("-> 好") == SL_ERROR);
     check("目标为空报错",          parse_kind("-> 好|") == SL_ERROR);

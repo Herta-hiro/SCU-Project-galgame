@@ -31,7 +31,7 @@ CARD_LIM = {
     "stage": 300,
     "offline": 600,
     "call": 40,
-    "events": 7000,
+    "events": 14000,
 }
 
 CARD_KEYS = {
@@ -258,6 +258,10 @@ def check_script(path, cards, rep):
             target = f[1].strip()
 
             if target.startswith("@"):
+                # "@input" 是自由输入的入口，由引擎单独处理，不是角色分支
+                if target == "@input":
+                    continue
+
                 m = re.fullmatch(r"@([^:]+)(?::(.+))?", target)
                 if not m:
                     rep.err(path, ch["line"],

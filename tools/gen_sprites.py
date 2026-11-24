@@ -83,7 +83,7 @@ def head(expr="normal", tilt=0.0):
         if expr == "down":
             d.arc([ex - 24, eye_y - 12, ex + 24, eye_y + 16], 200, 340, fill=INK, width=5)
             d.line([(ex - 22, eye_y + 2), (ex + 22, eye_y + 2)], fill=INK, width=4)
-        elif expr == "soft":
+        elif expr in ("soft", "smile", "shy"):
             d.arc([ex - 22, eye_y - 6, ex + 22, eye_y + 20], 190, 350, fill=INK, width=6)
             d.line([(ex - 22, eye_y + 4), (ex + 22, eye_y + 4)], fill=INK, width=3)
         elif expr == "look":
@@ -100,7 +100,7 @@ def head(expr="normal", tilt=0.0):
 
     # 鼻、嘴
     d.line([(cx, cy + 34), (cx + 6, cy + 52)], fill=SKIN_SHADE, width=3)
-    if expr == "soft":
+    if expr in ("soft", "smile"):
         d.arc([cx - 16, cy + 62, cx + 16, cy + 90], 20, 160, fill=(150, 92, 92), width=4)
     elif expr == "normal":
         d.line([(cx - 12, cy + 78), (cx + 12, cy + 78)], fill=(150, 92, 92), width=4)
@@ -178,6 +178,7 @@ def body():
     for hx in (cx - 168, cx + 168):
         d.ellipse([hx - 34, 918, hx + 34, 1002], fill=SKIN)
         d.arc([hx - 34, 906, hx + 34, 1010], 200, 340, fill=SKIN_SHADE, width=4)
+
 
     # 卫衣褶皱
     for yy in (700, 820, 980):
