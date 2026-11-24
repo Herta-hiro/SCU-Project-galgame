@@ -35,7 +35,7 @@
 #define CARD_TONE_MAX     300
 #define CARD_OFFLINE_MAX  600
 #define CARD_CALL_MAX      40
-#define CARD_EVENTS_MAX  7000
+#define CARD_EVENTS_MAX 14000
 
 typedef struct {
     char id[MAX_ID];

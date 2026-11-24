@@ -85,6 +85,14 @@ static float g_acc;
 static char  g_speaker[40];
 static char  g_text[MAX_TEXT];
 
+/* 流式生成期间临时显示在对话框里的文本（见 ui_set_stream） */
+static const char *g_stream;
+
+void ui_set_stream(const char *text)
+{
+    g_stream = text;
+}
+
 static int utf8_len(unsigned char c)
 {
     if (c < 0x80) return 1;
@@ -211,6 +219,37 @@ void ui_draw(const Game *g)
     DrawRectangleRounded(box, 0.06f, 8, COL_BOX);
     DrawRectangleRoundedLines(box, 0.06f, 8, COL_BOX_EDGE);
 
+    /* 生成中：正文直接显示已收到的部分，不画全屏遮罩、
+       也不弹「正在生成」——玩家看到的就是她的话在对话框里一行行长出来。 */
+    if (g_stream) {
+        float y = TEXT_Y;
+        const char *p = g_stream;
+        int row = 0;
+
+        while (p && *p && row < 3) {
+            const char *nl = strchr(p, '\n');
+            int len = nl ? (int)(nl - p) : (int)strlen(p);
+            if (len > 0) {
+                char seg[MAX_TEXT];
+                if (len >= (int)sizeof(seg)) len = (int)sizeof(seg) - 1;
+                memcpy(seg, p, (size_t)len);
+                seg[len] = '\0';
+                y += (float)ui_draw_wrapped(seg, TEXT_X, y, TEXT_W,
+                                            BODY_SIZE, COL_BODY, LINE_H);
+                row++;
+            }
+            if (!nl) break;
+            p = nl + 1;
+        }
+
+        /* 右下角一个很淡的省略号，表示还在写 */
+        Vector2 sz = MeasureTextEx(g_font, "…", 19, 1.0f);
+        DrawTextEx(g_font, "…", (Vector2){ BOX_X + BOX_W - sz.x - 28,
+                                           BOX_Y + BOX_H - 38 }, 19, 1.0f,
+                   (Color){ 120, 134, 148, 190 });
+        return;
+    }
+
     /* 说话人 */
     if (g_speaker[0]) {
         Vector2 sz = MeasureTextEx(g_font, g_speaker, NAME_SIZE, 1.0f);
@@ -254,25 +293,39 @@ Rectangle ui_choice_rect(int index, int total)
     return r;
 }
 
-static int visible_count(const Node *n, int affinity)
+static int visible_count(const Node *n, int affinity, int seen_events)
 {
     int c = 0;
     for (int i = 0; n && i < n->choice_count; i++)
-        if (choice_visible(&n->choices[i], affinity)) c++;
+        if (choice_visible(&n->choices[i], affinity, seen_events)) c++;
     return c;
 }
 
-int ui_choice_hit(Vector2 m, const Node *n, int affinity)
+/* 选项区永远比剧本多一个：「（自己说一句）」。
+   它不在 Node.choices 里（免得改剧本），由 ui 画出来、main 单独处理。
+   这样玩家在**任何**选择点都能自由开口，而不是非要等到 hub——
+   而 hub 基本停不住，每次回去都被自动路由带去下一个事件。 */
+#define FREE_CHOICE_TEXT "（自己说一句）"
+
+static int total_slots(const Node *n, int affinity, int seen_events)
+{
+    return visible_count(n, affinity, seen_events) + 1;
+}
+
+int ui_choice_hit(Vector2 m, const Node *n, int affinity, int seen_events)
 {
     if (!n) return -1;
 
-    int total = visible_count(n, affinity);
+    int total = total_slots(n, affinity, seen_events);
     int k = 0;
     for (int i = 0; i < n->choice_count; i++) {
-        if (!choice_visible(&n->choices[i], affinity)) continue;
+        if (!choice_visible(&n->choices[i], affinity, seen_events)) continue;
         if (CheckCollisionPointRec(m, ui_choice_rect(k, total))) return i;
         k++;
     }
+
+    /* 虚拟选项：索引返回 choice_count，调用方据此切到输入界面 */
+    if (CheckCollisionPointRec(m, ui_choice_rect(k, total))) return n->choice_count;
     return -1;
 }
 
@@ -281,11 +334,12 @@ void ui_draw_choices(const Game *g, int hover_index)
     const Node *n = game_current_node(g);
     if (!n || !g->waiting_choice) return;
 
-    int total = visible_count(n, g->affinity);
+    int seen_ev = game_seen_count(g);
+    int total = total_slots(n, g->affinity, seen_ev);
     int k = 0;
 
     for (int i = 0; i < n->choice_count; i++) {
-        if (!choice_visible(&n->choices[i], g->affinity)) continue;
+        if (!choice_visible(&n->choices[i], g->affinity, seen_ev)) continue;
 
         Rectangle r = ui_choice_rect(k, total);
         int hover = (i == hover_index);
@@ -299,6 +353,23 @@ void ui_draw_choices(const Game *g, int hover_index)
                               r.y + (r.height - sz.y) * 0.5f },
                    24, 1.0f, hover ? COL_NAME : COL_BODY);
         k++;
+    }
+
+    /* 最后那个「（自己说一句）」：比正文暗一档，让它是“可选项”而不是主分支 */
+    {
+        Rectangle r = ui_choice_rect(k, total);
+        int hover = (hover_index == n->choice_count);
+
+        DrawRectangleRounded(r, 0.45f, 10,
+                             hover ? COL_CHOICE_HI : (Color){ 22, 28, 34, 180 });
+        DrawRectangleRoundedLines(r, 0.45f, 10,
+                                  hover ? COL_NAME : (Color){ 72, 86, 100, 200 });
+
+        Vector2 sz = MeasureTextEx(g_font, FREE_CHOICE_TEXT, 23, 1.0f);
+        DrawTextEx(g_font, FREE_CHOICE_TEXT,
+                   (Vector2){ r.x + (r.width - sz.x) * 0.5f,
+                              r.y + (r.height - sz.y) * 0.5f },
+                   23, 1.0f, hover ? COL_NAME : (Color){ 150, 162, 176, 255 });
     }
 }
 

@@ -3,6 +3,7 @@
 #include "menu.h"
 #include "ai.h"
 #include "audio.h"
+#include "voice.h"
 #include "character.h"
 #include "bg.h"
 #include "sprite.h"
@@ -25,6 +26,108 @@
 __declspec(dllimport) int __stdcall SetProcessDpiAwarenessContext(void *value);
 #endif
 
+/* ---------------- 自由输入 ---------------- */
+/*
+ * raylib 不处理 IME：中文能从 Windows 拿到 WM_CHAR（GetCharPressed 收得到），
+ * 但**候选窗不显示**，玩家等于盲打。所以这里补一条 Ctrl+V 粘贴通道：
+ * 在别处（记事本、微信）打好一句话复制过来，粘进输入框。
+ */
+/* 输入上限跟 Choice.prompt 的容量（160 字节）对齐：句子最终要装进那个字段
+   喂给模型，输入框比它长没有意义，只会被截断。约 50 个汉字。 */
+#define FREE_INPUT_MAX 152
+
+static char g_free_input[FREE_INPUT_MAX];
+
+#if defined(_WIN32)
+/* 不 include <windows.h>：它和 raylib 的 Rectangle / CloseWindow / ShowCursor
+   正面撞名，会把整个编译单元搞崩。这里只按需声明剪贴板那几个导出函数。 */
+__declspec(dllimport) int    __stdcall OpenClipboard(void *hwnd);
+__declspec(dllimport) int    __stdcall CloseClipboard(void);
+__declspec(dllimport) void  *__stdcall GetClipboardData(unsigned int format);
+__declspec(dllimport) void  *__stdcall GlobalLock(void *mem);
+__declspec(dllimport) int    __stdcall GlobalUnlock(void *mem);
+
+#define CF_UNICODETEXT_W 13
+
+/* 读剪贴板里的 Unicode 文本，转成 UTF-8 追加到 buf。返回追加的字节数。 */
+static int clipboard_paste_utf8(char *buf, int size)
+{
+    if (!OpenClipboard(NULL)) return 0;
+
+    int added = 0;
+    void *h = GetClipboardData(CF_UNICODETEXT_W);
+    if (h) {
+        const unsigned short *w = (const unsigned short *)GlobalLock(h);
+        if (w) {
+            int used = (int)strlen(buf);
+            for (; *w && used < size - 5; w++) {
+                unsigned int cp = (unsigned int)*w;
+
+                /* 跳过换行：输入框是单行，粘多行会脏 */
+                if (cp == '\r' || cp == '\n' || cp == '\t') cp = ' ';
+                if (cp < 0x20) continue;
+
+                char tmp[4];
+                int n;
+                if (cp < 0x80) {
+                    tmp[0] = (char)cp; n = 1;
+                } else if (cp < 0x800) {
+                    tmp[0] = (char)(0xC0 | (cp >> 6));
+                    tmp[1] = (char)(0x80 | (cp & 0x3F));
+                    n = 2;
+                } else if (cp < 0x10000) {
+                    tmp[0] = (char)(0xE0 | (cp >> 12));
+                    tmp[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    tmp[2] = (char)(0x80 | (cp & 0x3F));
+                    n = 3;
+                } else {
+                    continue;               /* UTF-16 代理对不处理，中文用不到 */
+                }
+                memcpy(buf + used, tmp, (size_t)n);
+                used += n;
+                added += n;
+                buf[used] = '\0';
+            }
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+    return added;
+}
+#endif
+
+/* 追加一个码点（GetCharPressed 给的是 Unicode） */
+static void input_append_cp(int cp)
+{
+    int used = (int)strlen(g_free_input);
+    char tmp[4];
+    int n;
+
+    if (cp < 0x20 || cp == 0x7F) return;      /* 控制字符不要 */
+
+    if (cp < 0x80)                          { tmp[0] = (char)cp; n = 1; }
+    else if (cp < 0x800)                    { tmp[0] = (char)(0xC0 | (cp >> 6));
+                                              tmp[1] = (char)(0x80 | (cp & 0x3F)); n = 2; }
+    else if (cp < 0x10000)                  { tmp[0] = (char)(0xE0 | (cp >> 12));
+                                              tmp[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                              tmp[2] = (char)(0x80 | (cp & 0x3F)); n = 3; }
+    else                                    return;
+
+    if (used + n >= FREE_INPUT_MAX - 1) return;
+    memcpy(g_free_input + used, tmp, (size_t)n);
+    g_free_input[used + n] = '\0';
+}
+
+/* 删掉最后一个字符（按 UTF-8 字符边界，不是按字节） */
+static void input_pop_cp(void)
+{
+    int n = (int)strlen(g_free_input);
+    if (n == 0) return;
+    int i = n - 1;
+    while (i > 0 && ((unsigned char)g_free_input[i] & 0xC0) == 0x80) i--;
+    g_free_input[i] = '\0';
+}
+
 static Game  g_game;
 static int   g_line_was_read;
 static float g_skip_timer;
@@ -32,6 +135,10 @@ static char  g_toast[64];
 static float g_toast_timer;
 static int   g_prev_state = STATE_TITLE;
 static int   g_ai_pending;
+static int   g_ai_free;        /* 这一次请求是不是「自己说一句」（不走缓存的那种） */
+static float g_ai_wait;        /* 已经等了多久（秒）。超过 AI_WAIT_LIMIT 就放弃，
+                                  免得网络挂住时界面定在「生成中」不动。 */
+#define AI_WAIT_LIMIT 20.0f
 static int   g_quit;          /* 用户主动退出，与剧本“本章结束”区分开 */
 static int   g_fast_force;    /* 调试用：把 Ctrl 快进当成一直按住 */
 static unsigned char g_seen_forced[416];  /* 调试用：--seen 预置的已触发事件 */
@@ -85,6 +192,7 @@ static int is_read(const Game *g)
 
 static void start_line(Game *g)
 {
+    ui_set_stream(NULL);      /* 新一轮开始，把上一轮的流式残留清掉 */
     g_line_was_read = is_read(g);
 
     const Line *ln = game_current_line(g);
@@ -93,6 +201,14 @@ static void start_line(Game *g)
         log_push(g, ln->speaker, ln->text);
     } else {
         ui_begin_line("", "");
+    }
+
+    /* 配音跟着台词走：一行一个文件，切行即停上一句。
+       旁白（speaker 空）和没生成过的行都是静默跳过，不阻塞流程。 */
+    {
+        const Node *cn = game_current_node(g);
+        if (ln && cn) voice_play_line(cn->id, g->line_index, ln->speaker);
+        else          voice_stop();
     }
 
     mark_read(g);
@@ -185,9 +301,56 @@ static void fill_ai_prompt(Game *g, const Choice *c, const char *char_id, AiProm
     }
 
     p->affection = g->affinity;
+    p->stage_index = stage;
 }
 
-static void begin_ai_branch(Game *g, const Choice *c, const char *char_id, const char *ret_id)
+/* ---------------- 自由输入的返回点 ---------------- */
+
+/* 玩家是在某个"等待选择"的状态下开口的，演完 AI 那段之后要原样回到这里。
+   不能走 game_enter_index：那会重跑自动路由，把玩家带去别的事件，
+   或者把当前事件从头再演一遍。 */
+static int g_free_node = -1;
+static int g_free_line = -1;
+
+/* 有保存点就恢复并返回 1 */
+static int resume_after_free(Game *g)
+{
+    if (g_free_node < 0) return 0;
+
+    int n = g_free_node;
+    int l = g_free_line;
+    g_free_node = g_free_line = -1;
+
+    if (n < 0 || n >= g->node_count) return 0;
+
+    game_restore_index(g, n);          /* 只铺开节点，不跑路由 */
+    if (l < 0 || l >= g->nodes[n].line_count) l = g->nodes[n].line_count - 1;
+    if (l < 0) l = 0;
+
+    g->line_index     = l;
+    g->waiting_choice = 1;             /* 回到"还在等玩家选"的状态 */
+    g->finished       = 0;
+    start_line(g);
+    return 1;
+}
+
+/* 请求没发出去（上一次还在跑）：立刻把界面还原，别让玩家干等。
+   返回 1 表示已经处理完毕（界面恢复了），调用方直接 return。 */
+static int ai_request_failed(Game *g)
+{
+    g_ai_pending = 0;
+    ai_abandon();
+    toast("上一次还没结束，稍等一下");
+
+    if (!resume_after_free(g)) {
+        game_enter_index(g, g->ai_return_index);
+        start_line(g);
+    }
+    return 1;
+}
+
+static void begin_ai_branch(Game *g, const Choice *c, const char *char_id,
+                            const char *ret_id, int no_cache)
 {
     AiPrompt p;
     fill_ai_prompt(g, c, char_id, &p);
@@ -198,12 +361,36 @@ static void begin_ai_branch(Game *g, const Choice *c, const char *char_id, const
     g->ai_return_index = script_find(g, ret_id);
     if (g->ai_return_index < 0) g->ai_return_index = g->node_index;
 
+    /* 自由输入绕过缓存：同一句话每次都要有新回答，见 AiPrompt.no_cache */
+    p.no_cache = no_cache;
+    g_ai_free  = no_cache;
+
     /* 剧本第四列先存着：模型没给判定（离线、或状态栏写坏了）时用它兜底 */
     g_ai_base_aff = c ? c->affinity : 1;
 
     g->ai_active = 0;
     g_ai_pending = 1;
-    ai_request(&p);
+    g_ai_wait    = 0.0f;
+
+    if (!ai_request(&p)) ai_request_failed(g);
+}
+
+/* 自由输入：玩家自己打的一句话，当作一次 AI 支线来演。
+   没有剧本第四列可兜底，所以离线时按 0 结算（不奖不罚），
+   在线时全看模型的「判定」。 */
+static void begin_ai_free(Game *g, const char *text)
+{
+    Choice tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    /* text 只有 80 字节，放不下整句；它只用于选项/日志显示，
+       真正喂给模型的是 prompt（160 字节）。都按码点截，不切半个汉字。 */
+    utf8_truncate(tmp.text,   (int)sizeof(tmp.text),   text, 26);
+    utf8_truncate(tmp.prompt, (int)sizeof(tmp.prompt), text, 50);
+    tmp.affinity = 0;
+
+    /* 回到玩家说话的那个节点（hub）。自由发言不该把玩家推去别的地方。 */
+    const Node *n = game_current_node(g);
+    begin_ai_branch(g, &tmp, "shenzhiji", n ? n->id : "hub", 1);
 }
 
 static void finish_ai_branch(Game *g)
@@ -218,14 +405,36 @@ static void finish_ai_branch(Game *g)
     if (g->ai_node.line_count == 0) {
         g_ai_pending = 0;
         toast("生成内容为空，已跳过");
-        game_enter_index(g, g->ai_return_index);
-        start_line(g);
+        if (!resume_after_free(g)) {
+            game_enter_index(g, g->ai_return_index);
+            start_line(g);
+        }
         return;
     }
 
     /* 判定落地：以前这一行是被直接丢掉的，模型判了也白判。
        在线时用模型给的分量，离线兜底台词没有状态栏，退回剧本第四列。 */
-    apply_affinity(g, has_judge ? delta_from_judgement(judgement) : g_ai_base_aff);
+    {
+        int before = g->affinity;
+        int delta  = has_judge ? delta_from_judgement(judgement) : g_ai_base_aff;
+        apply_affinity(g, delta);
+
+        /* 控制台留一行账：判了多少、折算多少、好感从多少到多少。
+           模型偶尔会漏掉状态栏（实测约十次一次），这时退回剧本第四列，
+           自由输入没有第四列，就是 0——写清楚免得看着像“它没反应”。 */
+        printf("[AI] %s 判定=%+d ×%d → %+d   好感 %d → %d\n",
+               has_judge ? "模型" : "缺判定，退回剧本",
+               judgement, AI_JUDGE_SCALE, delta, before, g->affinity);
+
+        /* 自由说完给个即时反馈：不然玩家不知道刚才那句话到底算不算数，
+           好感没涨就会以为游戏卡住了（表现是「说了也不往前走」）。
+           剧本分支不给这个提示——那边有台词和画面在演，不需要额外说明。 */
+        if (g_ai_free) {
+            if (delta > 0)       toast("她对这句话有反应");
+            else if (delta < 0)  toast("她没接这句话");
+            else                 toast("她只是听着，没什么变化");
+        }
+    }
 
     g_ai_pending  = 0;
     g->ai_active  = 1;
@@ -241,6 +450,7 @@ static void finish_ai_branch(Game *g)
 
     if (ai_from_cache() == 2)      toast("离线模式 · 未配置 API key");
     else if (ai_from_cache() == 1) toast("读取缓存");
+    else                           toast("AI 现场生成");   /* 让玩家看得出这是模型写的 */
 }
 
 /* ---------------- 推进 ---------------- */
@@ -253,8 +463,10 @@ static void advance_game(Game *g)
             start_line(g);
         } else {
             g->ai_active = 0;
-            game_enter_index(g, g->ai_return_index);
-            start_line(g);
+            if (!resume_after_free(g)) {
+                game_enter_index(g, g->ai_return_index);
+                start_line(g);
+            }
         }
         return;
     }
@@ -262,13 +474,26 @@ static void advance_game(Game *g)
     if (game_advance(g)) start_line(g);
 }
 
-/* 加/减好感。负数只扣到“进这一场时的好感度”，不会把你打回上一档去刷保底。 */
+/* 好感按选项结算，并限制在 0-100。负面选择会影响后续路由。 */
 static void apply_affinity(Game *g, int delta)
 {
     g->affinity += delta;
-    if (g->affinity < g->event_entry_aff) g->affinity = g->event_entry_aff;
     if (g->affinity < 0)   g->affinity = 0;
     if (g->affinity > 100) g->affinity = 100;
+}
+
+/* 按当前节点的 @meter 分流：默认加好感，H 段加 bond（距离/心结）。
+   好感在阶段 4 早就封顶，H 段的 +2/+3 加在好感上等于没有，所以单独记一条。 */
+static void apply_delta(Game *g, int delta)
+{
+    const Node *n = game_current_node(g);
+    if (n && n->meter == METER_BOND) {
+        g->bond += delta;
+        if (g->bond < 0)   g->bond = 0;
+        if (g->bond > 100) g->bond = 100;
+        return;
+    }
+    apply_affinity(g, delta);
 }
 
 static void handle_choice(Game *g)
@@ -276,16 +501,34 @@ static void handle_choice(Game *g)
     const Node *n = game_current_node(g);
     if (!n || !g->waiting_choice) return;
 
-    int i = ui_choice_hit(GetMousePosition(), n, g->affinity);
+    int i = ui_choice_hit(GetMousePosition(), n, g->affinity, game_seen_count(g));
     if (i < 0 || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
 
     audio_se_click();
+
+    /* 虚拟选项「（自己说一句）」：索引 == choice_count，切到输入界面 */
+    if (i >= n->choice_count) {
+        g_free_node = g->node_index;
+        g_free_line = g->line_index;
+        g_free_input[0] = '\0';
+        g_game.state = STATE_INPUT;
+        return;
+    }
+
+    /* 剧本里也可以显式写 -> （自己说一句）|@input，效果一样 */
+    if (strcmp(n->choices[i].target, "@input") == 0) {
+        g_free_node = g->node_index;
+        g_free_line = g->line_index;
+        g_free_input[0] = '\0';
+        g_game.state = STATE_INPUT;
+        return;
+    }
 
     if (choice_is_ai(&n->choices[i])) {
         char cid[MAX_ID], rid[MAX_ID];
         choice_split_ai(&n->choices[i], cid, MAX_ID, rid, MAX_ID);
         /* 好感等生成结束再结算：模型会给出判定，见 finish_ai_branch */
-        begin_ai_branch(g, &n->choices[i], cid, rid);
+        begin_ai_branch(g, &n->choices[i], cid, rid, 0);
         return;
     }
 
@@ -293,9 +536,20 @@ static void handle_choice(Game *g)
     if (idx >= 0) {
         memory_push(g, "玩家", n->choices[i].prompt[0] ? n->choices[i].prompt
                                                        : n->choices[i].text);
-        apply_affinity(g, n->choices[i].affinity);
+        apply_delta(g, n->choices[i].affinity);
+
+        int from = g->node_index;
         game_enter_index(g, idx);
         start_line(g);
+
+        /* 自环且没被路由带走：说明当前好感下已经没有可触发的事件了。
+           以前这里什么都不提示，玩家会一直点「继续坐着」，以为游戏卡住了。 */
+        if (idx == from && g->node_index == from) {
+            if (game_seen_count(g) >= 6)
+                toast("今天没有别的事了 · 收拾东西可以走了");
+            else
+                toast("还早 · 再坐着看看");
+        }
     }
 }
 
@@ -303,7 +557,7 @@ static int hovered_choice(Game *g)
 {
     const Node *n = game_current_node(g);
     if (!n || !g->waiting_choice) return -1;
-    return ui_choice_hit(GetMousePosition(), n, g->affinity);
+    return ui_choice_hit(GetMousePosition(), n, g->affinity, game_seen_count(g));
 }
 
 /* ---------------- 各状态的输入 ---------------- */
@@ -323,11 +577,123 @@ static void update_title(void)
             g_prev_state = STATE_TITLE;
             g_game.state = STATE_LOAD;
             break;
+        case TITLE_CONFIG:
+            g_prev_state = STATE_TITLE;
+            menu_config_open();
+            g_game.state = STATE_CONFIG;
+            break;
         case TITLE_QUIT:
             g_quit = 1;
             break;
         default: break;
     }
+}
+
+/* ---------------- 自由输入界面 ---------------- */
+
+/* 去掉首尾空白，顺便把连续空格压成一个——模型对一长串空格没兴趣 */
+static void trim_input(char *s)
+{
+    char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+
+    int n = (int)strlen(s);
+    while (n > 0 && (s[n-1] == ' ' || s[n-1] == '\t')) s[--n] = '\0';
+}
+
+static void update_input(void)
+{
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        g_game.state = STATE_GAME;
+        return;
+    }
+
+    /* Ctrl+V 粘贴：中文输入法在 raylib 里没有候选窗，这是最实用的一条路 */
+    if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) &&
+        IsKeyPressed(KEY_V)) {
+#if defined(_WIN32)
+        if (clipboard_paste_utf8(g_free_input, FREE_INPUT_MAX) > 0)
+            audio_se_click();
+#endif
+    }
+
+    if (IsKeyPressed(KEY_BACKSPACE)) input_pop_cp();
+
+    int ch;
+    while ((ch = GetCharPressed()) > 0) input_append_cp(ch);
+
+    if (IsKeyPressed(KEY_ENTER)) {
+        trim_input(g_free_input);
+        if (!g_free_input[0]) return;
+
+        audio_se_click();
+        g_game.state = STATE_GAME;
+        begin_ai_free(&g_game, g_free_input);
+    }
+}
+
+static void draw_input(void)
+{
+    DrawRectangle(0, 0, SCREEN_W, SCREEN_H, (Color){ 4, 6, 9, 210 });
+
+    const char *title = "说点什么";
+    float tw = ui_text_width(title, 26);
+    ui_draw_text(title, (SCREEN_W - tw) * 0.5f, 210, 26,
+                 (Color){ 232, 196, 132, 255 });
+
+    Rectangle box = { (SCREEN_W - 720) * 0.5f, 268, 720, 150 };
+    DrawRectangleRounded(box, 0.12f, 8, (Color){ 18, 22, 28, 255 });
+    DrawRectangleRoundedLines(box, 0.12f, 8, (Color){ 96, 116, 136, 255 });
+
+    /* 按字符折行，每行 26 个汉字左右 */
+    if (g_free_input[0]) {
+        char buf[FREE_INPUT_MAX];
+        snprintf(buf, sizeof(buf), "%s", g_free_input);
+
+        float y = box.y + 26;
+        int   row = 0;
+        char *p = buf;
+        while (p && *p && row < 4) {
+            char seg[128];
+            utf8_truncate(seg, (int)sizeof(seg), p, 26);
+
+            float w = ui_text_width(seg, 22);
+            ui_draw_text(seg, box.x + 24, y, 22, (Color){ 226, 220, 208, 255 });
+            (void)w;
+
+            p += strlen(seg);
+            y += 34;
+            row++;
+        }
+
+        /* 光标：跟在最后一行末尾闪 */
+        if (((int)(GetTime() * 2)) % 2 == 0) {
+            char seg[128];
+            utf8_truncate(seg, (int)sizeof(seg), buf, 26);
+            const char *last = buf;
+            while (strlen(last) > 0 && strcmp(last, seg) != 0) {
+                if (strlen(last) <= strlen(seg)) break;
+                /* 找最后一段 */
+                last += strlen(seg);
+                if (*last == '\0') break;
+                seg[0] = '\0';
+                utf8_truncate(seg, (int)sizeof(seg), last, 26);
+            }
+            float w = ui_text_width(seg, 22);
+            float cy = box.y + 26 + (row - 1) * 34;
+            DrawRectangle((int)(box.x + 24 + w + 2), (int)cy, 2, 24,
+                          (Color){ 232, 196, 132, 255 });
+        }
+    } else {
+        ui_draw_text("（在这里输入，或者 Ctrl+V 粘贴）", box.x + 24, box.y + 28, 20,
+                     (Color){ 92, 104, 118, 255 });
+    }
+
+    const char *hint = "Enter 说出口    Esc 取消    Ctrl+V 粘贴（中文建议在别处打好再粘）";
+    float hw = ui_text_width(hint, 16);
+    ui_draw_text(hint, (SCREEN_W - hw) * 0.5f, box.y + box.height + 28, 16,
+                 (Color){ 110, 122, 138, 255 });
 }
 
 static void update_slots(void)
@@ -362,6 +728,11 @@ static void update_log(void)
     if (menu_update_log(&g_game)) g_game.state = STATE_GAME;
 }
 
+static void update_config(void)
+{
+    if (menu_update_config()) g_game.state = STATE_TITLE;
+}
+
 /* 快进节奏。
    已读行直接跳（0.06 秒一行）；未读行也给一点阅读时间再自动推进，
    否则第一次通读时按住 Ctrl 会“完全没反应”——旧实现只跳已读行，
@@ -382,30 +753,55 @@ static void update_game(float dt)
                IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
 
     if (IsKeyPressed(KEY_ESCAPE)) {
+        /* 生成中按 Esc 只取消这一次，不退游戏——玩家多半只是不想等了，
+           直接把人踢回标题太粗暴。 */
+        if (g_ai_pending) {
+            g_ai_pending = 0;
+            ai_abandon();
+            toast("已跳过这次生成");
+            if (!resume_after_free(&g_game)) {
+                game_enter_index(&g_game, g_game.ai_return_index);
+                start_line(&g_game);
+            }
+            return;
+        }
+        voice_stop();
         g_game.state = STATE_TITLE;
         return;
     }
     if (IsKeyPressed(KEY_S)) {
+        voice_stop();
         g_prev_state = STATE_GAME;
         g_game.state = STATE_SAVE;
         audio_se_page();
         return;
     }
     if (IsKeyPressed(KEY_L)) {
+        voice_stop();
         g_prev_state = STATE_GAME;
         g_game.state = STATE_LOAD;
         audio_se_page();
         return;
     }
     if (IsKeyPressed(KEY_TAB)) {
+        voice_stop();
         g_game.state = STATE_LOG;
         audio_se_page();
         return;
     }
+    if (IsKeyPressed(KEY_V)) {
+        voice_set_enabled(!voice_enabled());
+        toast(voice_enabled() ? "配音已开" : "配音已关");
+    }
+    if (IsKeyPressed(KEY_M)) {
+        audio_set_bgm_enabled(!audio_bgm_enabled());
+        toast(audio_bgm_enabled() ? "雨声已开" : "雨声已关");
+    }
 
-    if (g_ai_pending) return;   /* 等待生成时不接受推进输入 */
+    if (g_ai_pending) { voice_stop(); return; }   /* 等待生成时不接受推进输入 */
 
     if (g_game.waiting_choice) {
+        voice_stop();                              /* 停在选项上不用再念 */
         handle_choice(&g_game);
         return;
     }
@@ -420,6 +816,7 @@ static void update_game(float dt)
     }
 
     if (fast && !g_game.finished && !g_game.waiting_choice && ui_is_done()) {
+        voice_stop();                              /* 快进时不出声，否则一路叠着叫 */
         g_skip_timer += dt;
         if (g_skip_timer > skip_delay(game_current_line(&g_game), g_line_was_read)) {
             g_skip_timer = 0.0f;
@@ -432,20 +829,62 @@ static void update_game(float dt)
 
 /* ---------------- 绘制 ---------------- */
 
+/* 生成期间把已收到的部分喂给对话框。
+   以前这里是「全屏压暗 + 居中一行『正在生成……』」，画面整个黑一下再弹开，
+   很跳。现在只在对话框里长字，背景、立绘、标题都不动，看起来就是她在说话。 */
+static void feed_ai_stream(void)
+{
+    static char raw[AI_REPLY_MAX];
+    static char tail[900];
+
+    if (!g_ai_pending || !ai_is_configured() || ai_from_cache() == 2) {
+        ui_set_stream(NULL);
+        return;
+    }
+
+    int n = ai_partial_copy(raw, (int)sizeof(raw));
+    if (n <= 0) { ui_set_stream(NULL); return; }
+
+    /* 只留最后 3 个非状态栏的行：前面的玩家已经看过了，
+       状态栏【判定：…】是引擎读的，不能出现在剧情里。 */
+    char *keep[3] = { NULL, NULL, NULL };
+    int   rows = 0;
+    char *line = raw;
+
+    while (line && *line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+
+        if (line[0] && strncmp(line, "【", 3) != 0) {
+            if (rows < 3) {
+                keep[rows++] = line;
+            } else {
+                keep[0] = keep[1];
+                keep[1] = keep[2];
+                keep[2] = line;
+            }
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+
+    tail[0] = '\0';
+    for (int i = 0; i < rows; i++) {
+        if (i) strncat(tail, "\n", sizeof(tail) - strlen(tail) - 1);
+        strncat(tail, keep[i], sizeof(tail) - strlen(tail) - 1);
+    }
+    ui_set_stream(tail);
+}
+
 static void draw_ai_pending(void)
 {
-    const char *msg = "正在生成……";
-    float w = ui_text_width(msg, 24);
-    DrawRectangle(0, 0, SCREEN_W, SCREEN_H, (Color){ 4, 6, 9, 150 });
-    ui_draw_text(msg, (SCREEN_W - w) * 0.5f, SCREEN_H * 0.5f - 40, 24,
-                 (Color){ 232, 196, 132, 255 });
+    /* 没有 key 时给个说明，其余情况什么都不画——正文区已经在长字了 */
+    if (ai_is_configured()) return;
 
-    if (!ai_is_configured()) {
-        const char *hint = "未检测到 API key，将使用离线兜底文本";
-        float hw = ui_text_width(hint, 17);
-        ui_draw_text(hint, (SCREEN_W - hw) * 0.5f, SCREEN_H * 0.5f + 6, 17,
-                     (Color){ 110, 122, 138, 255 });
-    }
+    const char *msg = "未检测到 API key，使用离线兜底文本";
+    float w = ui_text_width(msg, 16);
+    ui_draw_text(msg, (SCREEN_W - w) * 0.5f, SCREEN_H - 92, 16,
+                 (Color){ 120, 132, 146, 200 });
 }
 
 static void draw_toast(float dt)
@@ -467,6 +906,8 @@ int main(int argc, char **argv)
     const char *shot = NULL;
     const char *shot_node = NULL;
     int         shot_aff = 0;
+    int         shot_bond = 0;
+    int         shot_pick = -1;
     int         dump_prompt = 0;
     int         parse_demo = 0;
     float       skip_sim = 0.0f;
@@ -474,6 +915,7 @@ int main(int argc, char **argv)
     const char *seen_list = NULL;
     const char *history_seed = NULL;
     int         check_mode = 0;
+    int         voice_check = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc)      shot = argv[++i];
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) script_path = argv[++i];
@@ -481,10 +923,13 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--history") == 0 && i + 1 < argc) history_seed = argv[++i];
         else if (strcmp(argv[i], "--node") == 0 && i + 1 < argc) shot_node = argv[++i];
         else if (strcmp(argv[i], "--aff") == 0 && i + 1 < argc)  shot_aff = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--bond") == 0 && i + 1 < argc) shot_bond = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--pick") == 0 && i + 1 < argc) shot_pick = atoi(argv[++i]);
         else if (strcmp(argv[i], "--skip-sim") == 0 && i + 1 < argc) skip_sim = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--prompt") == 0) dump_prompt = 1;
         else if (strcmp(argv[i], "--parse-demo") == 0) parse_demo = 1;
         else if (strcmp(argv[i], "--check") == 0) check_mode = 1;
+        else if (strcmp(argv[i], "--voice-check") == 0) voice_check = 1;
     }
 
 #if defined(_WIN32)
@@ -502,6 +947,34 @@ int main(int argc, char **argv)
     if (check_mode) {
         printf("CHECK: 节点 %d, 错误 %d\n", g_game.node_count, script_error_count());
         return script_error_count() ? 1 : 0;
+    }
+
+    /* 配音覆盖检查：不需要声卡、不需要模型，只看 data/voice/ 里缺哪几句。
+       改了台词（或加了新节点）之后跑一遍，就知道要补哪几句：
+           gal.exe --voice-check
+       退出码 0 = 全齐，1 = 有缺口。 */
+    if (voice_check) {
+        int total = 0, have = 0;
+        char path[192];
+
+        for (int i = 0; i < g_game.node_count; i++) {
+            const Node *n = &g_game.nodes[i];
+            for (int j = 0; j < n->line_count; j++) {
+                const Line *ln = &n->lines[j];
+                if (!ln->speaker[0]) continue;          /* 旁白不配音 */
+
+                total++;
+                snprintf(path, sizeof(path), "data/voice/%s_%d.ogg", n->id, j);
+                if (FileExists(path)) { have++; continue; }
+                snprintf(path, sizeof(path), "data/voice/%s_%d.wav", n->id, j);
+                if (FileExists(path)) { have++; continue; }
+
+                printf("缺配音: %s_%d  %s|%s\n", n->id, j, ln->speaker, ln->text);
+            }
+        }
+        printf("配音覆盖: %d/%d 句%s\n", have, total,
+               have == total ? "" : "（缺的用 python tools/gen_voice.py 补）");
+        return have == total ? 0 : 1;
     }
 
     int cards = characters_load("data/characters.gal");
@@ -616,7 +1089,15 @@ int main(int argc, char **argv)
     bg_init();
     sprite_init();
     audio_init();
+    voice_init();
     ai_init();
+
+    /* 调试模式（截图 / 快进模拟）默认不出声：省掉音频解码，也免得半句话卡在缓冲里。
+       GAL_VOICE=1 可以强行保留，用来验证「这一行到底有没有配到音」。 */
+    if (shot || skip_sim > 0.0f) {
+        const char *force = getenv("GAL_VOICE");
+        if (!(force && force[0] == '1')) voice_set_enabled(0);
+    }
 
     /* 预热：启动时先加载一次常用纹理，避免第一帧绘制时纹理还没上传到 GPU */
     {
@@ -686,7 +1167,8 @@ int main(int argc, char **argv)
             int vis = 0;
             if (cn) {
                 for (int i = 0; i < cn->choice_count; i++)
-                    if (choice_visible(&cn->choices[i], g_game.affinity)) vis++;
+                    if (choice_visible(&cn->choices[i], g_game.affinity,
+                                       game_seen_count(&g_game))) vis++;
             }
             printf("choices: node=%s total=%d visible=%d aff=%d\n",
                    cn ? cn->id : "?", cn ? cn->choice_count : 0, vis, g_game.affinity);
@@ -704,15 +1186,32 @@ int main(int argc, char **argv)
             if (shot_aff < 0)   shot_aff = 0;
             if (shot_aff > 100) shot_aff = 100;
             g_game.affinity = shot_aff;
+            g_game.bond = shot_bond;
             game_enter_node(&g_game, shot_node ? shot_node : "start");
             g_game.state = STATE_GAME;
             start_line(&g_game);
 
             const Node *rn = game_current_node(&g_game);
-            printf("node=%s  aff=%d  lines=%d  toast=%s\n",
-                   rn ? rn->id : "?", g_game.affinity, rn ? rn->line_count : 0,
+            printf("node=%s  aff=%d  bond=%d  lines=%d  toast=%s\n",
+                   rn ? rn->id : "?", g_game.affinity, g_game.bond, rn ? rn->line_count : 0,
                    (rn && rn->toast[0]) ? rn->toast : "-");
             if (rn && rn->toast[0]) toast(rn->toast);
+
+            /* 调试：模拟点第 N 个选项（只支持普通分支），用来验证数值和跳转 */
+            if (shot_pick >= 0 && rn && shot_pick < rn->choice_count) {
+                const Choice *c = &rn->choices[shot_pick];
+                int tgt = script_find(&g_game, c->target);
+                if (tgt >= 0) {
+                    apply_delta(&g_game, c->affinity);
+                    game_enter_node(&g_game, c->target);
+                    start_line(&g_game);
+                    const Node *nn = game_current_node(&g_game);
+                    printf("picked=%d -> node=%s aff=%d bond=%d\n",
+                           shot_pick, nn ? nn->id : "?", g_game.affinity, g_game.bond);
+                } else {
+                    printf("picked=%d -> 目标 %s 不存在或不是普通分支\n", shot_pick, c->target);
+                }
+            }
         } else if (strcmp(shot, "ai") == 0) {
             /* 走一遍 AI 支线：无 key 时命中角色卡里的离线台词，按好感阶段取。
                --node 指定从哪个节点取第一条 AI 分支，--aff 指定好感度。 */
@@ -734,8 +1233,16 @@ int main(int argc, char **argv)
             } else {
                 char cid[MAX_ID], rid[MAX_ID];
                 choice_split_ai(&sn->choices[picked], cid, MAX_ID, rid, MAX_ID);
-                begin_ai_branch(&g_game, &sn->choices[picked], cid, rid);
-                ai_poll();
+                begin_ai_branch(&g_game, &sn->choices[picked], cid, rid, 0);
+
+                /* 异步请求要等：以前这里只 poll 一次，网络稍慢就拿到空结果，
+                   看起来像"接了 key 也没反应"。最多等 40 秒。 */
+                for (int wait = 0; wait < 800; wait++) {
+                    ai_poll();
+                    if (ai_state() != AI_BUSY) break;
+                    WaitTime(0.05);
+                }
+
                 if (ai_state() == AI_DONE) finish_ai_branch(&g_game);
                 printf("ai_state=%d  lines=%d  aff=%d  stage=%s\n",
                        ai_state(), g_game.ai_node.line_count, g_game.affinity,
@@ -753,6 +1260,56 @@ int main(int argc, char **argv)
                 log_push(&g_game, ln->speaker, ln->text);
             }
             g_game.state = STATE_LOG;
+        } else if (strcmp(shot, "config") == 0) {
+            menu_config_open();
+            g_game.state = STATE_CONFIG;
+        } else if (strcmp(shot, "input") == 0) {
+            /* 自由输入界面：预填一句话，用来检查排版与折行 */
+            game_restart(&g_game);
+            game_enter_node(&g_game, "meet");
+            g_game.state = STATE_GAME;
+            start_line(&g_game);
+            snprintf(g_free_input, sizeof(g_free_input), "%s",
+                     "我把《成都通史》还了，顺便帮你也查了那本书在不在架上。");
+            g_game.state = STATE_INPUT;
+        } else if (strcmp(shot, "stream") == 0) {
+            /* 模拟「正在生成」：对话框里一段长到一半的文本，检查是否还有全屏遮罩 */
+            game_restart(&g_game);
+            game_enter_node(&g_game, "meet");
+            g_game.state = STATE_GAME;
+            start_line(&g_game);
+
+            static char demo[] =
+                "沈知霁：……你查了哪本。\n"
+                "旁白：她笔停了一下，抬眼看过来，手指还压";
+            ui_set_stream(demo);
+            g_ai_pending = 1;
+        } else if (strcmp(shot, "free") == 0) {
+            /* 走完整条自由输入链路：hub → 输入 → AI 生成 → 回 hub。
+               用来在没有手动输入的情况下验证这条路通不通。 */
+            game_restart(&g_game);
+            g_game.affinity = (shot_aff > 0) ? shot_aff : 55;
+            game_enter_node(&g_game, "hub");
+            g_game.state = STATE_GAME;
+            start_line(&g_game);
+
+            const char *say = "我把《成都通史》还了，顺便帮你也查了那本书在不在架上。";
+            printf("自由输入: %s\n", say);
+
+            begin_ai_free(&g_game, say);
+            for (int wait = 0; wait < 800; wait++) {
+                ai_poll();
+                if (ai_state() != AI_BUSY) break;
+                WaitTime(0.05);
+            }
+            if (ai_state() == AI_DONE) finish_ai_branch(&g_game);
+
+            printf("ai_state=%d  source=%d  lines=%d  aff=%d\n",
+                   ai_state(), ai_from_cache(), g_game.ai_node.line_count, g_game.affinity);
+            for (int k = 0; k < g_game.ai_node.line_count; k++)
+                printf("  [%d] %s：%s\n", k,
+                       g_game.ai_node.lines[k].speaker, g_game.ai_node.lines[k].text);
+            printf("返回节点 index=%d（应为 hub）\n", g_game.ai_return_index);
         }
 
         ui_finish();
@@ -765,6 +1322,7 @@ int main(int argc, char **argv)
             else if (g_game.state == STATE_SAVE)  menu_draw_slots(&g_game, 1);
             else if (g_game.state == STATE_LOAD)  menu_draw_slots(&g_game, 0);
             else if (g_game.state == STATE_LOG)   menu_draw_log(&g_game);
+            else if (g_game.state == STATE_CONFIG) menu_draw_config();
             else {
                 ui_draw(&g_game);
                 ui_draw_choices(&g_game, -1);
@@ -776,6 +1334,7 @@ int main(int argc, char **argv)
         TakeScreenshot("shot.png");
         printf("screenshot -> shot.png  (state=%d)\n", g_game.state);
         ai_shutdown();
+        voice_shutdown();          /* 必须先于 audio_shutdown 卸载音频 */
         audio_shutdown();
         sprite_shutdown();
         bg_shutdown();
@@ -788,12 +1347,34 @@ int main(int argc, char **argv)
         float dt = GetFrameTime();
 
         ai_poll();
+        feed_ai_stream();      /* 已收到的部分喂给对话框正文 */
+
+        /* 客户端超时兜底：curl 自己有 20 秒超时，但进程卡死、DNS 挂起之类
+           的情况仍可能不返回。等超过 AI_WAIT_LIMIT 就主动放弃，恢复界面。 */
+        if (g_ai_pending) {
+            g_ai_wait += dt;
+            if (g_ai_wait > AI_WAIT_LIMIT) {
+                g_ai_pending = 0;
+                ai_abandon();
+                toast("生成超时，已跳过（可按 Esc 取消）");
+                if (!resume_after_free(&g_game)) {
+                    game_enter_index(&g_game, g_game.ai_return_index);
+                    start_line(&g_game);
+                }
+            }
+        }
+
         if (g_ai_pending && ai_state() == AI_DONE)   finish_ai_branch(&g_game);
         if (g_ai_pending && ai_state() == AI_FAILED) {
             g_ai_pending = 0;
             toast(ai_error());
-            game_enter_index(&g_game, g_game.ai_return_index);
-            start_line(&g_game);
+            /* 失败也别白选：按剧本第四列结算，和离线兜底保持一致，
+               否则同一个选项“联网成功按判定、断网 0 分”，节奏对不上。 */
+            apply_affinity(&g_game, g_ai_base_aff);
+            if (!resume_after_free(&g_game)) {
+                game_enter_index(&g_game, g_game.ai_return_index);
+                start_line(&g_game);
+            }
         }
 
         switch (g_game.state) {
@@ -802,6 +1383,8 @@ int main(int argc, char **argv)
             case STATE_SAVE:
             case STATE_LOAD:  update_slots(); break;
             case STATE_LOG:   update_log();   break;
+            case STATE_CONFIG: update_config(); break;
+            case STATE_INPUT:  update_input();  break;
             default: break;
         }
 
@@ -811,15 +1394,17 @@ int main(int argc, char **argv)
         ui_tick(dt, fast);
 
         audio_update();
+        voice_update();
         ui_scene_tick(dt, g_game.bg);
 
-        /* 进新节点就冒一句提示（@toast）：安静坐下这种循环点一次有反馈 */
+        /* 进入新节点时显示节点提示；一次性事件代表新的一天。 */
         {
             static unsigned last_seq = 0;
             if (g_game.enter_seq != last_seq) {
                 last_seq = g_game.enter_seq;
                 const Node *cn = game_current_node(&g_game);
                 if (cn && cn->toast[0]) toast(cn->toast);
+                else if (cn && cn->once_id > 0) toast("又过了一天。");
 
                 /* 事件本身也进“已知信息”，让 AI 支线记得你帮过什么 */
                 if (cn && cn->event[0]) memory_push(&g_game, "事件", cn->event);
@@ -844,6 +1429,13 @@ int main(int argc, char **argv)
                 ui_draw(&g_game);
                 menu_draw_log(&g_game);
                 break;
+            case STATE_CONFIG:
+                menu_draw_config();
+                break;
+            case STATE_INPUT:
+                ui_draw(&g_game);
+                draw_input();
+                break;
             default:
                 ui_draw(&g_game);
                 ui_draw_choices(&g_game, hovered_choice(&g_game));
@@ -862,6 +1454,7 @@ int main(int argc, char **argv)
     }
 
     ai_shutdown();
+    voice_shutdown();          /* 必须先于 audio_shutdown 卸载音频 */
     audio_shutdown();
     sprite_shutdown();
     bg_shutdown();

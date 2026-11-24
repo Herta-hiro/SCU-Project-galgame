@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "bg.h"
 #include "sprite.h"
+#include "ai.h"
 
 #include "raylib.h"
 #include <stdio.h>
@@ -23,8 +24,8 @@ static const Color COL_CARD      = {  18,  23,  31, 240 };
 
 /* ============ 标题 ============ */
 
-static const char *TITLE_ITEMS[] = { "开始新游戏", "继续游戏", "退出" };
-#define TITLE_COUNT 3
+static const char *TITLE_ITEMS[] = { "开始新游戏", "继续游戏", "API Key 设置", "退出" };
+#define TITLE_COUNT 4
 
 static int g_title_sel = 0;   /* 当前高亮项，鼠标和键盘共用 */
 
@@ -64,7 +65,8 @@ int menu_update_title(void)
     switch (pick) {
         case 0: return TITLE_NEW;
         case 1: return TITLE_CONTINUE;
-        case 2: return TITLE_QUIT;
+        case 2: return TITLE_CONFIG;
+        case 3: return TITLE_QUIT;
         default: break;
     }
 
@@ -262,4 +264,144 @@ void menu_draw_log(Game *g)
                   (Color){ 52, 60, 72, 255 });
 
     ui_draw_text("滚轮 / ↑↓ 翻页    Esc 或 Tab 返回", 120, SCREEN_H - 62, 17, COL_DIM);
+}
+
+/* ============ API Key 设置 ============ */
+
+#define CFG_KEY_MAX 160
+
+static char g_cfg_key[CFG_KEY_MAX];
+static int  g_cfg_ready = 0;
+static char g_cfg_msg[64] = "";
+
+static const Rectangle CFG_BOX        = { 290, 264, 700, 60 };
+static const Rectangle CFG_BTN_SAVE   = { 310, 384, 200, 52 };
+static const Rectangle CFG_BTN_CLEAR  = { 540, 384, 200, 52 };
+static const Rectangle CFG_BTN_BACK   = { 770, 384, 200, 52 };
+
+void menu_config_open(void)
+{
+    snprintf(g_cfg_key, sizeof(g_cfg_key), "%s", ai_get_key());
+    g_cfg_msg[0] = '\0';
+    g_cfg_ready = 1;
+}
+
+static int cfg_hover(const Rectangle *r)
+{
+    return CheckCollisionPointRec(GetMousePosition(), *r);
+}
+
+int menu_update_config(void)
+{
+    if (!g_cfg_ready) menu_config_open();
+
+    int ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+
+    /* Ctrl+V：粘贴剪贴板，过滤换行/中文等非可打印字符 */
+    if (ctrl && IsKeyPressed(KEY_V)) {
+        const char *clip = GetClipboardText();
+        if (clip) {
+            for (const char *p = clip; *p; p++) {
+                size_t n = strlen(g_cfg_key);
+                if (n >= sizeof(g_cfg_key) - 1) break;
+                unsigned char c = (unsigned char)*p;
+                if (c >= 32 && c <= 126) g_cfg_key[n] = (char)c;
+            }
+        }
+    }
+    /* Ctrl+C：复制当前已输入内容 */
+    if (ctrl && IsKeyPressed(KEY_C)) {
+        if (g_cfg_key[0]) SetClipboardText(g_cfg_key);
+    }
+
+    /* 文本输入：只收可打印 ASCII，key 形如 sk-... */
+    int ch;
+    while ((ch = GetCharPressed()) != 0) {
+        size_t n = strlen(g_cfg_key);
+        if (ch >= 32 && ch <= 126 && n < sizeof(g_cfg_key) - 1)
+            g_cfg_key[n] = (char)ch;
+    }
+    if (IsKeyPressed(KEY_BACKSPACE) && g_cfg_key[0])
+        g_cfg_key[strlen(g_cfg_key) - 1] = '\0';
+
+    int click_save  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cfg_hover(&CFG_BTN_SAVE);
+    int click_clear = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cfg_hover(&CFG_BTN_CLEAR);
+    int click_back  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cfg_hover(&CFG_BTN_BACK);
+
+    if (IsKeyPressed(KEY_ENTER))   click_save = 1;
+    if (IsKeyPressed(KEY_ESCAPE))  click_back = 1;
+
+    if (click_save) {
+        ai_save_config(g_cfg_key, NULL);
+        if (g_cfg_key[0]) snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已保存，AI 支线已接入");
+        else              snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已保存（未填 key，走离线台词）");
+    } else if (click_clear) {
+        g_cfg_key[0] = '\0';
+        ai_save_config("", NULL);
+        snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已清空，将走离线台词");
+    } else if (click_back) {
+        g_cfg_ready = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void cfg_draw_button(const Rectangle *r, const char *label, int on)
+{
+    DrawRectangleRounded(*r, 0.3f, 8, on ? COL_ITEM_HI : COL_ITEM);
+    DrawRectangleRoundedLines(*r, 0.3f, 8, on ? COL_EDGE_HI : COL_EDGE);
+    Color tc = on ? COL_TITLE : COL_TEXT;
+    float tw = ui_text_width(label, 22);
+    ui_draw_text(label, r->x + (r->width - tw) * 0.5f, r->y + 15, 22, tc);
+}
+
+void menu_draw_config(void)
+{
+    DrawRectangle(0, 0, SCREEN_W, SCREEN_H, COL_MASK);
+
+    const char *title = "API Key 设置";
+    ui_draw_text(title, (SCREEN_W - ui_text_width(title, 34)) * 0.5f, 110, 34, COL_TITLE);
+
+    const char *sub = "填入 DeepSeek 密钥以启用 AI 支线；留空则使用离线台词，不影响通关。";
+    ui_draw_text(sub, (SCREEN_W - ui_text_width(sub, 18)) * 0.5f, 164, 18, COL_DIM);
+
+    /* 状态行：已接入就掩码显示，不把完整 key 摊在画面上 */
+    char mask[48];
+    const char *status;
+    if (ai_is_configured()) {
+        const char *k = ai_get_key();
+        const char *tail = strlen(k) > 2 ? k + strlen(k) - 2 : "";
+        snprintf(mask, sizeof(mask), "已接入（%.3s····%s）", k, tail);
+        status = mask;
+    } else {
+        status = "未配置（离线模式）";
+    }
+    ui_draw_text(status, CFG_BOX.x, 224, 18,
+                 ai_is_configured() ? COL_TITLE : COL_DIM);
+
+    /* 输入框 */
+    DrawRectangleRounded(CFG_BOX, 0.15f, 8, COL_CARD);
+    DrawRectangleRoundedLines(CFG_BOX, 0.15f, 8, COL_EDGE);
+
+    if (g_cfg_key[0])
+        ui_draw_text(g_cfg_key, CFG_BOX.x + 20, CFG_BOX.y + 18, 22, COL_TEXT);
+    else
+        ui_draw_text("sk-在这里输入你的密钥", CFG_BOX.x + 20, CFG_BOX.y + 18, 22, COL_DIM);
+
+    /* 闪烁光标 */
+    if (((int)(GetTime() * 2.0f) % 2) == 0) {
+        float tx = CFG_BOX.x + 20 + ui_text_width(g_cfg_key, 22);
+        DrawRectangle(tx, CFG_BOX.y + 16, 2, 28, COL_TITLE);
+    }
+
+    cfg_draw_button(&CFG_BTN_SAVE,  "保存", cfg_hover(&CFG_BTN_SAVE));
+    cfg_draw_button(&CFG_BTN_CLEAR,  "清空", cfg_hover(&CFG_BTN_CLEAR));
+    cfg_draw_button(&CFG_BTN_BACK,   "返回", cfg_hover(&CFG_BTN_BACK));
+
+    if (g_cfg_msg[0])
+        ui_draw_text(g_cfg_msg, CFG_BOX.x, 470, 18, COL_TITLE);
+
+    const char *hint = "Enter 保存 · Esc 返回 · Ctrl+V 粘贴 · Ctrl+C 复制";
+    ui_draw_text(hint, (SCREEN_W - ui_text_width(hint, 17)) * 0.5f,
+                 SCREEN_H - 60, 17, COL_DIM);
 }

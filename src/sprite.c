@@ -59,7 +59,10 @@ static Texture2D *load_slot(const char *char_id, const char *expr)
         snprintf(slot->name, sizeof(slot->name), "%s", want);
         slot->tex = LoadTexture(path);
         if (slot->tex.id > 0) {
-            SetTextureFilter(slot->tex, TEXTURE_FILTER_BILINEAR);
+            /* 立绘 1600 高、屏幕上只画 700 多，双线性缩小时会抖、也容易拖边。
+               生成 mipmap 后用三线性过滤，人物边缘更干净。 */
+            GenTextureMipmaps(&slot->tex);
+            SetTextureFilter(slot->tex, TEXTURE_FILTER_TRILINEAR);
             slot->ok = 1;
             return &slot->tex;
         }

@@ -9,7 +9,12 @@ data/sprites/
 ├── shenzhiji_normal.png    常态
 ├── shenzhiji_look.png      抬眼
 ├── shenzhiji_down.png      低头看书
-└── shenzhiji_soft.png      软下来
+├── shenzhiji_soft.png      软下来
+├── shenzhiji_surprised.png 愣住意外
+├── shenzhiji_shy.png       害羞躲闪
+├── shenzhiji_smile.png     克制浅笑
+├── shenzhiji_cold.png      戒备拒绝
+└── shenzhiji_umbrella.png   手持收拢伞
 ```
 
 命名规则：`<角色id>_<表情>.png`。剧本里写的是 `@char shenzhiji:look`，所以文件名必须对上。
@@ -34,6 +39,11 @@ data/sprites/
 | `shenzhiji_look` | 「椅子没人」、雨夜、你越界时 | 抬眼、审视、带距离 |
 | `shenzhiji_normal` | 第二天、找索引、闭馆 | 平静、公事公办 |
 | `shenzhiji_soft` | 还伞那天、闭馆前那句「明天…还来吗」 | 嘴硬但松了一点 |
+| `shenzhiji_surprised` | 天府馆偶遇「……你也来这边」 | 愣住、睁眼、意外 |
+| `shenzhiji_shy` | 递水「别多想」、表白后低头看鞋尖耳红 | 害羞、躲闪 |
+| `shenzhiji_smile` | 朋友结局、暖结局「明天也来」 | 克制浅笑、温和 |
+| `shenzhiji_cold` | 「我自己来」「别拍」「别。」「说了想一下」 | 皱眉、戒备、拒绝 |
+| `shenzhiji_umbrella` | 结尾起身那句「……伞」 | 手持收拢黑伞、准备离开 |
 
 ## 四、已经有图但尺寸不对
 
@@ -57,6 +67,22 @@ python tools/import_sprite.py 你的图.png --as shenzhiji_normal --crop 0.58 --
 
 ## 七、目录里的其他东西
 
-- `_unused/`：之前试过的两套占位图（我程序画的 + OpenGameArt 的 Codel 素材），
-  剧本已经不再引用，**可以直接删**；
+- 早期的两套占位图（程序绘制 + OpenGameArt 的 Codel 素材）剧本已不再引用，
+  目录精简时移除，文件留存于清理前的备份包；
 - `CREDITS.md`：素材署名记录（如果哪天用回 Codel，需要保留那段 CC BY 署名）。
+
+## 白边 / 亮边处理
+
+AI 出的透明底立绘容易在轮廓上留一圈白边（白底混色 + 缩小时的插值把它摊开）。
+仓库里的四张图已经处理过；换新图如果又出现白边：
+
+```sh
+python tools/defringe_sprites.py            # 处理 data/sprites/shenzhiji_*.png
+python tools/defringe_sprites.py 新图.png
+```
+
+脚本做三件事：半透明像素按白底反预乘、轮廓裁 1 像素、透明区 RGB 填成轮廓平均色
+（这样 mipmap 采样不会把白/黑拖进来）。原图会留在 `_backup/sprites-pre-defringe/`。
+
+引擎侧也配合改了：`sprite.c` 加载立绘时生成 mipmap 并用三线性过滤，缩放时边缘更稳。
+

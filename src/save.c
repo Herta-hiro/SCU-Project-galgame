@@ -23,6 +23,7 @@ typedef struct {
     int           node_index;
     int           line_index;
     int           affinity;
+    int           bond;
     int           read_bits[MAX_NODES];
     long long     timestamp;
     char          preview[96];
@@ -75,6 +76,7 @@ static int save_read_file(int slot, SaveData *d)
     if (fread(&d->node_index, sizeof(int), 1, f) != 1) goto done;
     if (fread(&d->line_index, sizeof(int), 1, f) != 1) goto done;
     if (fread(&d->affinity,   sizeof(int), 1, f) != 1) goto done;
+    if (fread(&d->bond,       sizeof(int), 1, f) != 1) goto done;
     if (fread(d->read_bits, sizeof(int), MAX_NODES, f) != MAX_NODES) goto done;
     if (fread(&d->timestamp, sizeof(long long), 1, f) != 1) goto done;
     if (fread(d->preview, 1, sizeof(d->preview), f) != sizeof(d->preview)) goto done;
@@ -115,6 +117,7 @@ int save_write(const Game *g, int slot)
     fwrite(&g->node_index, sizeof(int), 1, f);
     fwrite(&g->line_index, sizeof(int), 1, f);
     fwrite(&g->affinity,   sizeof(int), 1, f);
+    fwrite(&g->bond,       sizeof(int), 1, f);
     fwrite(g->read_bits,   sizeof(int), MAX_NODES, f);
     fwrite(&ts, sizeof(ts), 1, f);
     fwrite(preview, 1, sizeof(preview), f);
@@ -137,13 +140,14 @@ int save_read(Game *g, int slot)
     /* 先恢复好感度和事件位，再铺开节点。
        用 game_restore_index 而不是 game_enter_index：后者会跑自动路由，
        而存档里记的已经是路由之后的落点，重跑一次会被当前好感度带去别的分支。
-       顺序也有讲究——先设 affinity，apply_node 记下的 event_entry_aff 才是对的。
+       顺序也有讲究——先设 affinity，再恢复节点，确保后续演出状态一致。
 
        事件位是**覆盖**不是取并集。取并集会把这局后来演过的事件写进旧档，
        读回 D4 之前时 D4 的"已演"标记还在，hub 的路由命中已演事件就整条停住，
        玩家只剩「安静坐下」——一条死路。存档本来就该是"那一刻的完整状态"，
        读档之后那些事件回到未演，路由才能重新触发。 */
     g->affinity = d.affinity;
+    g->bond     = d.bond;
     memcpy(g->seen, d.seen, sizeof(g->seen));
     memcpy(g->read_bits, d.read_bits, sizeof(g->read_bits));
 

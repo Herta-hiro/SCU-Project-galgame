@@ -10,6 +10,8 @@ data/ai.conf
 prompt-preview.json
 shot.png
 bg_debug.log
+# 配音仓库里只存 ogg；wav 是没装 ffmpeg 时的临时产物
+data/voice/*.wav
 
 # ---- 开发过程的全量备份（三份快照，不属于版本控制） ----
 _backup/

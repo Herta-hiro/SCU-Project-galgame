@@ -17,4 +17,9 @@ void audio_shutdown(void);
 void audio_se_click(void);      /* 推进对话、点选项 */
 void audio_se_page(void);       /* 翻记录、开存读档 */
 
+/* 环境音（雨声）开关。默认开，但音量压得很低。
+ * 玩家可能只想听台词，按 M 就能把雨声关掉，界面音效和配音不受影响。 */
+void audio_set_bgm_enabled(int on);
+int  audio_bgm_enabled(void);
+
 #endif

@@ -8,6 +8,7 @@
 #define TITLE_NEW        1
 #define TITLE_CONTINUE   2
 #define TITLE_QUIT       3
+#define TITLE_CONFIG     4
 
 /* 槽位界面动作码 */
 #define SLOT_NONE       -1
@@ -21,5 +22,10 @@ void menu_draw_slots(Game *g, int saving);
 
 int  menu_update_log(Game *g);
 void menu_draw_log(Game *g);
+
+/* API Key 设置页 */
+void menu_config_open(void);
+int  menu_update_config(void);   /* 返回 1 表示关闭返回标题，0 留在本页 */
+void menu_draw_config(void);
 
 #endif
