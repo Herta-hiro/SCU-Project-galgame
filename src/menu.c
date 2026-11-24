@@ -275,9 +275,10 @@ static int  g_cfg_ready = 0;
 static char g_cfg_msg[64] = "";
 
 static const Rectangle CFG_BOX        = { 290, 264, 700, 60 };
-static const Rectangle CFG_BTN_SAVE   = { 310, 384, 200, 52 };
-static const Rectangle CFG_BTN_CLEAR  = { 540, 384, 200, 52 };
-static const Rectangle CFG_BTN_BACK   = { 770, 384, 200, 52 };
+static const Rectangle CFG_BTN_SAVE   = { 255, 384, 170, 52 };
+static const Rectangle CFG_BTN_CLEAR  = { 445, 384, 170, 52 };
+static const Rectangle CFG_BTN_MODE   = { 635, 384, 200, 52 };
+static const Rectangle CFG_BTN_BACK   = { 855, 384, 170, 52 };
 
 void menu_config_open(void)
 {
@@ -326,6 +327,7 @@ int menu_update_config(void)
 
     int click_save  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cfg_hover(&CFG_BTN_SAVE);
     int click_clear = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cfg_hover(&CFG_BTN_CLEAR);
+    int click_mode  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cfg_hover(&CFG_BTN_MODE);
     int click_back  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && cfg_hover(&CFG_BTN_BACK);
 
     if (IsKeyPressed(KEY_ENTER))   click_save = 1;
@@ -333,10 +335,25 @@ int menu_update_config(void)
 
     if (click_save) {
         ai_save_config(g_cfg_key, NULL);
-        if (g_cfg_key[0]) snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已保存，AI 支线已接入");
-        else              snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已保存（未填 key，走离线台词）");
+        if (!g_cfg_key[0])
+            snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已保存（未填 key，走离线台词）");
+        else if (ai_is_offline())
+            snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已保存，当前为离线模式");
+        else
+            snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已保存，AI 支线已接入");
+    } else if (click_mode) {
+        /* 只拨开关，不动 key：想临时回离线不用把密钥删了再粘一遍 */
+        ai_set_offline(!ai_is_offline());
+        ai_save_config(g_cfg_key, NULL);
+        if (!g_cfg_key[0])
+            snprintf(g_cfg_msg, sizeof(g_cfg_msg), "没有 key，只能离线");
+        else if (ai_is_offline())
+            snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已切到离线：不发请求，用剧本台词");
+        else
+            snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已切到在线：AI 现场生成");
     } else if (click_clear) {
         g_cfg_key[0] = '\0';
+        ai_set_offline(1);              /* 清空 key 自然就是离线，开关也归位 */
         ai_save_config("", NULL);
         snprintf(g_cfg_msg, sizeof(g_cfg_msg), "已清空，将走离线台词");
     } else if (click_back) {
@@ -366,18 +383,19 @@ void menu_draw_config(void)
     ui_draw_text(sub, (SCREEN_W - ui_text_width(sub, 18)) * 0.5f, 164, 18, COL_DIM);
 
     /* 状态行：已接入就掩码显示，不把完整 key 摊在画面上 */
-    char mask[48];
+    char mask[64];
     const char *status;
     if (ai_is_configured()) {
         const char *k = ai_get_key();
         const char *tail = strlen(k) > 2 ? k + strlen(k) - 2 : "";
-        snprintf(mask, sizeof(mask), "已接入（%.3s····%s）", k, tail);
+        snprintf(mask, sizeof(mask), "已接入（%.3s····%s）· %s",
+                 k, tail, ai_is_offline() ? "当前离线" : "当前在线");
         status = mask;
     } else {
-        status = "未配置（离线模式）";
+        status = "未配置 · 离线模式（用剧本台词，不发请求）";
     }
     ui_draw_text(status, CFG_BOX.x, 224, 18,
-                 ai_is_configured() ? COL_TITLE : COL_DIM);
+                 (!ai_is_configured() || ai_is_offline()) ? COL_DIM : COL_TITLE);
 
     /* 输入框 */
     DrawRectangleRounded(CFG_BOX, 0.15f, 8, COL_CARD);
@@ -396,12 +414,16 @@ void menu_draw_config(void)
 
     cfg_draw_button(&CFG_BTN_SAVE,  "保存", cfg_hover(&CFG_BTN_SAVE));
     cfg_draw_button(&CFG_BTN_CLEAR,  "清空", cfg_hover(&CFG_BTN_CLEAR));
+    cfg_draw_button(&CFG_BTN_MODE,
+                    ai_is_offline() ? "切到在线" : "切到离线",
+                    cfg_hover(&CFG_BTN_MODE));
     cfg_draw_button(&CFG_BTN_BACK,   "返回", cfg_hover(&CFG_BTN_BACK));
 
     if (g_cfg_msg[0])
         ui_draw_text(g_cfg_msg, CFG_BOX.x, 470, 18, COL_TITLE);
 
-    const char *hint = "Enter 保存 · Esc 返回 · Ctrl+V 粘贴 · Ctrl+C 复制";
+    const char *hint = "Enter 保存 · Esc 返回 · Ctrl+V 粘贴 · Ctrl+C 复制 · "
+                       "离线模式照样能通关（用角色卡台词）";
     ui_draw_text(hint, (SCREEN_W - ui_text_width(hint, 17)) * 0.5f,
                  SCREEN_H - 60, 17, COL_DIM);
 }

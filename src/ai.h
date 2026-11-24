@@ -69,6 +69,21 @@ void ai_init(void);
 void ai_shutdown(void);
 
 int  ai_is_configured(void);
+
+/* 是否走离线台词。
+ *
+ * 「配了 key」和「用不用 key」是两件事：填过 key 之后想临时回到离线模式
+ * （课堂演示不方便联网、想对比两种文本、key 额度用完），不该逼人把 key 删掉
+ * 再重新粘一遍。所以单独存一个 offline 开关，落在 data/ai.conf 里：
+ *
+ *     key=sk-xxxx
+ *     offline=1
+ *
+ * ai_is_offline() = offline 开关打开，或者根本没配 key。
+ * 离线时 ai_request() 直接返回角色卡里的 offlineN 台词，不发任何网络请求。 */
+int  ai_is_offline(void);
+void ai_set_offline(int on);
+
 void ai_set_config(const char *api_key, const char *model);
 
 /* 读取当前内存里的 key（未配置返回空串）；把 key/model 写回 data/ai.conf 并同步内存。

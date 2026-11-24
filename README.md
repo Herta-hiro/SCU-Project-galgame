@@ -59,6 +59,15 @@ key=sk-xxxxxxxx
 model=deepseek-chat
 ```
 
+填好 key 之后想临时回到离线，**不用把 key 删掉**：
+
+- 游戏内「API Key 设置」里点「切到离线」
+- 或者 `data/ai.conf` 里加一行 `offline=1`
+- 或者启动时加 `--offline` / 设环境变量 `GAL_OFFLINE=1`
+
+离线时用角色卡里按好感阶段写好的台词，流程完整，不发任何网络请求。
+三种方式都验证过：`offline=1` 走离线台词，`offline=0` 才会真的发请求。
+
 `model` 填 `deepseek-chat`。**不要填 `deepseek-reasoner`**——那个会先输出一大段思维链再给结果，
 一轮要十几秒，而且推理内容会混进台词里。游戏要的是「立刻接话」，不是「想清楚再答」。
 

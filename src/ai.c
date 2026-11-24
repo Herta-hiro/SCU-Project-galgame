@@ -40,6 +40,7 @@ static const char *OFFLINE_FALLBACK =
 
 static char g_key[160];
 static char g_model[64] = "deepseek-chat";
+static int  g_offline;      /* 1 = 有 key 也强制走离线台词，见 ai.h 的说明 */
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int      g_state = AI_IDLE;
@@ -55,6 +56,10 @@ static AiPrompt g_job;
 
 static void load_config(void)
 {
+    /* 环境变量 GAL_OFFLINE=1 也能强制离线，方便一次性的演示/录屏 */
+    const char *off = getenv("GAL_OFFLINE");
+    if (off && (off[0] == '1' || off[0] == 'y' || off[0] == 'Y')) g_offline = 1;
+
     const char *env = getenv("DEEPSEEK_API_KEY");
     if (env && *env) {
         snprintf(g_key, sizeof(g_key), "%s", env);
@@ -65,12 +70,23 @@ static void load_config(void)
     if (!f) return;
 
     char line[320];
+    int  first = 1;
     while (fgets(line, sizeof(line), f)) {
-        char *eq = strchr(line, '=');
+        /* 跳过 UTF-8 BOM：记事本、PowerShell 的 Out-File、不少编辑器都会在开头写 EF BB BF，
+           不跳的话第一行会变成 "\xEF\xBB\xBFkey"，strcmp(k,"key") 永远不相等——
+           表现就是「明明填了 key，游戏里却一直走离线」，而且看不出来为什么。 */
+        char *row = line;
+        if (first) {
+            first = 0;
+            unsigned char *u = (unsigned char *)row;
+            if (u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF) row += 3;
+        }
+
+        char *eq = strchr(row, '=');
         if (!eq) continue;
         *eq = '\0';
 
-        char *k = line;
+        char *k = row;
         char *v = eq + 1;
         while (*k == ' ' || *k == '\t') k++;
         while (*v == ' ' || *v == '\t') v++;
@@ -78,8 +94,9 @@ static void load_config(void)
         char *end = v + strlen(v);
         while (end > v && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ')) *--end = '\0';
 
-        if (strcmp(k, "key") == 0)        snprintf(g_key, sizeof(g_key), "%s", v);
-        else if (strcmp(k, "model") == 0) snprintf(g_model, sizeof(g_model), "%s", v);
+        if (strcmp(k, "key") == 0)          snprintf(g_key, sizeof(g_key), "%s", v);
+        else if (strcmp(k, "model") == 0)   snprintf(g_model, sizeof(g_model), "%s", v);
+        else if (strcmp(k, "offline") == 0) g_offline = (v[0] == '1' || v[0] == 'y' || v[0] == 'Y');
     }
     fclose(f);
 }
@@ -101,6 +118,8 @@ void ai_shutdown(void)
 }
 
 int  ai_is_configured(void) { return g_key[0] != '\0'; }
+int  ai_is_offline(void)    { return g_offline || g_key[0] == '\0'; }
+void ai_set_offline(int on) { g_offline = on ? 1 : 0; }
 int  ai_state(void)         { return g_state; }
 int  ai_from_cache(void)    { return g_source; }
 const char *ai_reply(void)  { return g_reply; }
@@ -144,6 +163,7 @@ void ai_save_config(const char *api_key, const char *model)
     fprintf(f, "# 不填 key 也能玩：走角色卡离线台词，流程完整，不会报错。\n");
     fprintf(f, "key=%s\n", g_key);
     fprintf(f, "model=%s\n", g_model);
+    fprintf(f, "offline=%d\n", g_offline);
     fclose(f);
 }
 
@@ -578,9 +598,9 @@ int ai_request(const AiPrompt *p)
         }
     }
 
-    /* 2. 没配置 key：走离线兜底，流程照样能演示。
+    /* 2. 没 key，或者有 key 但开关拨到了离线：走离线兜底，流程照样能演示。
           优先用角色卡里按阶段写好的 offlineN 台词。 */
-    if (!g_key[0]) {
+    if (g_offline || !g_key[0]) {
         snprintf(g_reply, sizeof(g_reply), "%s",
                  p->offline[0] ? p->offline : OFFLINE_FALLBACK);
         g_source = 2;

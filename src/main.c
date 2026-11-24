@@ -837,7 +837,7 @@ static void feed_ai_stream(void)
     static char raw[AI_REPLY_MAX];
     static char tail[900];
 
-    if (!g_ai_pending || !ai_is_configured() || ai_from_cache() == 2) {
+    if (!g_ai_pending || ai_is_offline() || ai_from_cache() == 2) {
         ui_set_stream(NULL);
         return;
     }
@@ -878,10 +878,10 @@ static void feed_ai_stream(void)
 
 static void draw_ai_pending(void)
 {
-    /* 没有 key 时给个说明，其余情况什么都不画——正文区已经在长字了 */
-    if (ai_is_configured()) return;
+    /* 只有在真的要发网络请求时才可能停留在这里；离线模式是同步返回，看不到这一帧 */
+    if (!ai_is_offline()) return;
 
-    const char *msg = "未检测到 API key，使用离线兜底文本";
+    const char *msg = "离线模式：使用剧本台词";
     float w = ui_text_width(msg, 16);
     ui_draw_text(msg, (SCREEN_W - w) * 0.5f, SCREEN_H - 92, 16,
                  (Color){ 120, 132, 146, 200 });
@@ -916,6 +916,7 @@ int main(int argc, char **argv)
     const char *history_seed = NULL;
     int         check_mode = 0;
     int         voice_check = 0;
+    int         force_offline = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc)      shot = argv[++i];
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) script_path = argv[++i];
@@ -930,6 +931,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--parse-demo") == 0) parse_demo = 1;
         else if (strcmp(argv[i], "--check") == 0) check_mode = 1;
         else if (strcmp(argv[i], "--voice-check") == 0) voice_check = 1;
+        else if (strcmp(argv[i], "--offline") == 0) force_offline = 1;
     }
 
 #if defined(_WIN32)
@@ -1091,6 +1093,11 @@ int main(int argc, char **argv)
     audio_init();
     voice_init();
     ai_init();
+    /* --offline：有 key 也强制走离线台词，演示时想稳一点用这个 */
+    if (force_offline) {
+        ai_set_offline(1);
+        printf("已按 --offline 强制离线\n");
+    }
 
     /* 调试模式（截图 / 快进模拟）默认不出声：省掉音频解码，也免得半句话卡在缓冲里。
        GAL_VOICE=1 可以强行保留，用来验证「这一行到底有没有配到音」。 */
