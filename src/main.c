@@ -515,8 +515,13 @@ static void handle_choice(Game *g)
         return;
     }
 
-    /* 剧本里也可以显式写 -> （自己说一句）|@input，效果一样 */
+    /* 剧本里也可以显式写 -> （自己说一句）|@input，效果一样；
+       但离线时同样不给进——那时候没有模型，打了字也没人接。 */
     if (strcmp(n->choices[i].target, "@input") == 0) {
+        if (ai_is_offline()) {
+            toast("离线模式：这句话没法接，先点别的推进");
+            return;
+        }
         g_free_node = g->node_index;
         g_free_line = g->line_index;
         g_free_input[0] = '\0';
@@ -1098,6 +1103,9 @@ int main(int argc, char **argv)
         ai_set_offline(1);
         printf("已按 --offline 强制离线\n");
     }
+    /* 主循环里每帧还会再同步一次（运行时切换开关）；这里先设一遍，
+       是因为 --shot / --skip-sim 这些调试路径不跑主循环。 */
+    ui_set_free_choice(!ai_is_offline());
 
     /* 调试模式（截图 / 快进模拟）默认不出声：省掉音频解码，也免得半句话卡在缓冲里。
        GAL_VOICE=1 可以强行保留，用来验证「这一行到底有没有配到音」。 */
@@ -1355,6 +1363,7 @@ int main(int argc, char **argv)
 
         ai_poll();
         feed_ai_stream();      /* 已收到的部分喂给对话框正文 */
+        ui_set_free_choice(!ai_is_offline());   /* 离线时不给「自己说一句」 */
 
         /* 客户端超时兜底：curl 自己有 20 秒超时，但进程卡死、DNS 挂起之类
            的情况仍可能不返回。等超过 AI_WAIT_LIMIT 就主动放弃，恢复界面。 */

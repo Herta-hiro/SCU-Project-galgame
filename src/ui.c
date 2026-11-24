@@ -93,6 +93,14 @@ void ui_set_stream(const char *text)
     g_stream = text;
 }
 
+/* 「（自己说一句）」是否出现。离线模式关掉，见 ui.h 的说明。 */
+static int g_free_choice = 1;
+
+void ui_set_free_choice(int on)
+{
+    g_free_choice = on ? 1 : 0;
+}
+
 static int utf8_len(unsigned char c)
 {
     if (c < 0x80) return 1;
@@ -309,7 +317,7 @@ static int visible_count(const Node *n, int affinity, int seen_events)
 
 static int total_slots(const Node *n, int affinity, int seen_events)
 {
-    return visible_count(n, affinity, seen_events) + 1;
+    return visible_count(n, affinity, seen_events) + (g_free_choice ? 1 : 0);
 }
 
 int ui_choice_hit(Vector2 m, const Node *n, int affinity, int seen_events)
@@ -325,7 +333,8 @@ int ui_choice_hit(Vector2 m, const Node *n, int affinity, int seen_events)
     }
 
     /* 虚拟选项：索引返回 choice_count，调用方据此切到输入界面 */
-    if (CheckCollisionPointRec(m, ui_choice_rect(k, total))) return n->choice_count;
+    if (g_free_choice && CheckCollisionPointRec(m, ui_choice_rect(k, total)))
+        return n->choice_count;
     return -1;
 }
 
@@ -355,8 +364,9 @@ void ui_draw_choices(const Game *g, int hover_index)
         k++;
     }
 
-    /* 最后那个「（自己说一句）」：比正文暗一档，让它是“可选项”而不是主分支 */
-    {
+    /* 最后那个「（自己说一句）」：比正文暗一档，让它是“可选项”而不是主分支。
+       离线模式下整块不出现。 */
+    if (g_free_choice) {
         Rectangle r = ui_choice_rect(k, total);
         int hover = (hover_index == n->choice_count);
 
